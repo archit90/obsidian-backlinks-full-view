@@ -27,13 +27,16 @@ var import_obsidian = require("obsidian");
 var PANEL_CLASS = "bfv-panel";
 var DEFAULT_EMBED_LIMIT = 25;
 var MAX_EMBED_DEPTH = 3;
+var MAX_OPEN_SAVED = 50;
 var defaults = () => ({
   title: "",
   // pane heading; falls back to "Backlinks" or "Query"
   filter: { type: "group", mode: "and", children: [] },
   sorts: [{ prop: "file.name", dir: "asc" }],
-  query: ""
+  query: "",
   // optional Dataview query that supplies the notes instead of backlinks
+  open: []
+  // paths of expanded cards, most recent first (at most MAX_OPEN_SAVED)
 });
 var FILE_PROPS = [
   { id: "file.name", label: "name", type: "text", group: "file" },
@@ -87,6 +90,8 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.views = /* @__PURE__ */ new WeakMap();
+    this.linksResolvedOnce = false;
+    // set by the first "resolved" event after the plugin loads
     this.allViews = /* @__PURE__ */ new Set();
     this.warned = /* @__PURE__ */ new Set();
     // ---------- public API (for DataviewJS) ----------
@@ -148,7 +153,10 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     this.registerEvent(this.app.workspace.on("layout-change", refresh));
     this.registerEvent(this.app.workspace.on("file-open", refresh));
     this.registerEvent(this.app.workspace.on("active-leaf-change", refresh));
-    this.registerEvent(this.app.metadataCache.on("resolved", refresh));
+    this.registerEvent(this.app.metadataCache.on("resolved", () => {
+      this.linksResolvedOnce = true;
+      refresh();
+    }));
     this.registerEvent(this.app.metadataCache.on("changed", refresh));
     this.registerEvent(this.app.vault.on("modify", refresh));
     try {
@@ -406,6 +414,31 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     if (sig === st.signature) return;
     st.signature = sig;
     this.sync(st, sources);
+    this.pruneOpen(st);
+  }
+  /** True once Obsidian's link index covers the whole vault (so missing backlinks really are gone). */
+  linksReady() {
+    if (this.linksResolvedOnce) return true;
+    const resolved = Object.keys(this.app.metadataCache.resolvedLinks).length;
+    return resolved > 0 && resolved >= this.app.vault.getMarkdownFiles().length;
+  }
+  /**
+   * Drop remembered cards that are no longer in the pane's results (deleted, renamed, or no longer matching
+   * the query), so `open:` only lists existing notes. Skipped while indexes are still loading or the query
+   * failed, when an empty or partial result would wrongly wipe the list.
+   */
+  pruneOpen(st) {
+    var _a, _b, _c, _d;
+    if (!st.config.open.length || st.error || !this.linksReady()) return;
+    if (st.config.query && !((_d = (_c = (_b = (_a = this.app.plugins) == null ? void 0 : _a.plugins) == null ? void 0 : _b.dataview) == null ? void 0 : _c.index) == null ? void 0 : _d.initialized)) return;
+    const keep = st.config.open.filter((p) => st.items.has(p));
+    if (keep.length === st.config.open.length) return;
+    const gone = st.config.open.filter((p) => !st.items.has(p));
+    for (const p of gone) st.opened.delete(p);
+    st.openOrder = st.openOrder.filter((p) => st.items.has(p));
+    st.config.open = keep;
+    st.view.dirty = true;
+    st.view.save();
   }
   // ---------- panel skeleton ----------
   createPanel(vs, config) {
@@ -458,7 +491,8 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       component,
       signature: "",
       collapsed: false,
-      opened: /* @__PURE__ */ new Set(),
+      opened: new Set(config.open),
+      openOrder: [...config.open].reverse(),
       items: /* @__PURE__ */ new Map(),
       propDefs: [...FILE_PROPS],
       types: /* @__PURE__ */ new Map(),
@@ -549,7 +583,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   parseList(raw) {
     const arr = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
     const out = arr.map(
-      (e) => this.parseConfig({ title: e == null ? void 0 : e.title, filter: this.jsonish(e == null ? void 0 : e.filter), sort: this.jsonish(e == null ? void 0 : e.sort), query: e == null ? void 0 : e.query })
+      (e) => this.parseConfig({ title: e == null ? void 0 : e.title, filter: this.jsonish(e == null ? void 0 : e.filter), sort: this.jsonish(e == null ? void 0 : e.sort), query: e == null ? void 0 : e.query, open: this.jsonish(e == null ? void 0 : e.open) })
     );
     return out.length ? out : [defaults()];
   }
@@ -582,6 +616,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         vs.panes[i].config = cfg;
         vs.panes[i].queryInput.value = cfg.query;
         vs.panes[i].titleInput.value = cfg.title;
+        this.syncOpen(vs.panes[i]);
         vs.panes[i].updateButtons();
         if (!switched) {
           vs.panes[i].renderEditors();
@@ -611,7 +646,8 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     const sorts = Array.isArray(r.sort) ? r.sort.filter((x) => x && typeof x.prop === "string").map((x) => ({ prop: x.prop, dir: x.dir === "desc" ? "desc" : "asc" })) : d.sorts;
     const query = typeof r.query === "string" ? r.query.trim() : "";
     const title = typeof r.title === "string" || typeof r.title === "number" ? String(r.title).trim() : "";
-    return { title, filter, sorts, query };
+    const open = Array.isArray(r.open) ? [...new Set(r.open.filter((x) => typeof x === "string" && x !== ""))].slice(0, MAX_OPEN_SAVED) : [];
+    return { title, filter, sorts, query, open };
   }
   sanitizeGroup(x) {
     var _a;
@@ -638,7 +674,8 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       title: p.config.title,
       filter: JSON.parse(JSON.stringify(p.config.filter)),
       sort: JSON.parse(JSON.stringify(p.config.sorts)),
-      query: p.config.query
+      query: p.config.query,
+      open: p.config.open
     })));
     const allDefault = list.length === 1 && JSON.stringify(list[0]) === JSON.stringify(def);
     vs.savedJson = JSON.stringify(list);
@@ -653,7 +690,8 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         title: c.title || null,
         filter: JSON.stringify(c.filter) === JSON.stringify(def.filter) ? null : JSON.stringify(c.filter),
         sort: JSON.stringify(c.sorts) === JSON.stringify(def.sorts) ? null : JSON.stringify(c.sorts),
-        query: c.query || null
+        query: c.query || null,
+        open: c.open.length ? c.open : null
       }));
     });
   }
@@ -1008,14 +1046,36 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   }
   // ---------- cards ----------
   createItem(st, src, sig, props, lists, tags) {
-    const { el, comp } = this.buildCard(st.listEl, src, st.component, st.opened);
-    return { file: src, sig, el, comp, props, lists, tags };
+    const { el, comp, setOpen } = this.buildCard(
+      st.listEl,
+      src,
+      st.component,
+      st.opened,
+      (path, open) => this.cardToggled(st, path, open)
+    );
+    return { file: src, sig, el, comp, setOpen, props, lists, tags };
+  }
+  /** The user expanded or collapsed a card: update recency and persist the most recent MAX_OPEN_SAVED. */
+  cardToggled(st, path, open) {
+    st.openOrder = st.openOrder.filter((p) => p !== path);
+    if (open) st.openOrder.push(path);
+    if (st.items.size && !st.error) st.openOrder = st.openOrder.filter((p) => st.items.has(p));
+    st.config.open = st.openOrder.slice(-MAX_OPEN_SAVED).reverse();
+    st.view.dirty = true;
+    st.view.save();
+  }
+  /** Frontmatter changed from outside: expand exactly the cards it lists. */
+  syncOpen(st) {
+    st.opened.clear();
+    for (const p of st.config.open) st.opened.add(p);
+    st.openOrder = [...st.config.open].reverse();
+    for (const it of st.items.values()) void it.setOpen(st.opened.has(it.file.path));
   }
   /**
    * A full-note collapsible card. It starts collapsed unless its path is in `opened`, and the note is only
    * read and rendered when the card is first expanded, so large panes stay cheap.
    */
-  buildCard(parentEl, src, parentComp, opened) {
+  buildCard(parentEl, src, parentComp, opened, onToggle) {
     const comp = new import_obsidian.Component();
     parentComp.addChild(comp);
     const item = parentEl.createDiv({ cls: "bfv-item" });
@@ -1055,8 +1115,9 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       if (willOpen) opened.add(src.path);
       else opened.delete(src.path);
       void setOpen(willOpen);
+      onToggle == null ? void 0 : onToggle(src.path, willOpen);
     });
     void setOpen(opened.has(src.path));
-    return { el: item, comp };
+    return { el: item, comp, setOpen };
   }
 };

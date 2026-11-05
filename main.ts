@@ -11,6 +11,7 @@ import {
 const PANEL_CLASS = "bfv-panel";
 const DEFAULT_EMBED_LIMIT = 25; // max notes rendered per bfv.embed() call
 const MAX_EMBED_DEPTH = 3;      // max nesting of embeds inside embeds
+const MAX_OPEN_SAVED = 50;      // expanded cards remembered per pane in frontmatter, most recent first
 // ---------- config model (mirrors Bases: nested and/or/not filters + multi-sort) ----------
 
 type PropType = "text" | "number" | "date" | "boolean" | "list";
@@ -18,13 +19,14 @@ interface Rule { type: "rule"; prop: string; op: string; value: string }
 interface Group { type: "group"; mode: "and" | "or" | "not"; children: Node[] }
 type Node = Rule | Group;
 interface SortRule { prop: string; dir: "asc" | "desc" }
-interface Settings { title: string; filter: Group; sorts: SortRule[]; query: string }
+interface Settings { title: string; filter: Group; sorts: SortRule[]; query: string; open: string[] }
 
 const defaults = (): Settings => ({
   title: "", // pane heading; falls back to "Backlinks" or "Query"
   filter: { type: "group", mode: "and", children: [] },
   sorts: [{ prop: "file.name", dir: "asc" }],
   query: "", // optional Dataview query that supplies the notes instead of backlinks
+  open: [],  // paths of expanded cards, most recent first (at most MAX_OPEN_SAVED)
 });
 
 interface PropDef { id: string; label: string; type: PropType; group: "file" | "note" }
@@ -62,6 +64,7 @@ interface ItemState {
   sig: string;
   el: HTMLElement;
   comp: Component;
+  setOpen: (open: boolean) => Promise<void>;
   props: Record<string, string[]>; // lower-cased key -> values
   lists: Set<string>;              // lower-cased keys whose value is an array
   tags: string[];
@@ -78,7 +81,8 @@ interface PanelState {
   component: Component;
   signature: string;
   collapsed: boolean;
-  opened: Set<string>;             // cards the user expanded; every other card starts collapsed
+  opened: Set<string>;             // cards currently expanded; every other card starts collapsed
+  openOrder: string[];             // expanded cards in the order they were opened, most recent last
   items: Map<string, ItemState>;
   propDefs: PropDef[];
   types: Map<string, PropType>;
@@ -138,6 +142,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}/;
 
 export default class FullBacklinksPlugin extends Plugin {
   private views = new WeakMap<MarkdownView, ViewState>();
+  private linksResolvedOnce = false; // set by the first "resolved" event after the plugin loads
   private allViews = new Set<ViewState>();
 
   async onload() {
@@ -153,7 +158,7 @@ export default class FullBacklinksPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("layout-change", refresh));
     this.registerEvent(this.app.workspace.on("file-open", refresh));
     this.registerEvent(this.app.workspace.on("active-leaf-change", refresh));
-    this.registerEvent(this.app.metadataCache.on("resolved", refresh));
+    this.registerEvent(this.app.metadataCache.on("resolved", () => { this.linksResolvedOnce = true; refresh(); }));
     this.registerEvent(this.app.metadataCache.on("changed", refresh));
     this.registerEvent(this.app.vault.on("modify", refresh));
     // Dataview signals (only fire when Dataview is installed)
@@ -401,6 +406,32 @@ export default class FullBacklinksPlugin extends Plugin {
     if (sig === st.signature) return;
     st.signature = sig;
     this.sync(st, sources);
+    this.pruneOpen(st);
+  }
+
+  /** True once Obsidian's link index covers the whole vault (so missing backlinks really are gone). */
+  private linksReady(): boolean {
+    if (this.linksResolvedOnce) return true;
+    const resolved = Object.keys(this.app.metadataCache.resolvedLinks).length;
+    return resolved > 0 && resolved >= this.app.vault.getMarkdownFiles().length;
+  }
+
+  /**
+   * Drop remembered cards that are no longer in the pane's results (deleted, renamed, or no longer matching
+   * the query), so `open:` only lists existing notes. Skipped while indexes are still loading or the query
+   * failed, when an empty or partial result would wrongly wipe the list.
+   */
+  private pruneOpen(st: PanelState) {
+    if (!st.config.open.length || st.error || !this.linksReady()) return;
+    if (st.config.query && !(this.app as any).plugins?.plugins?.dataview?.index?.initialized) return;
+    const keep = st.config.open.filter((p) => st.items.has(p));
+    if (keep.length === st.config.open.length) return;
+    const gone = st.config.open.filter((p) => !st.items.has(p));
+    for (const p of gone) st.opened.delete(p);
+    st.openOrder = st.openOrder.filter((p) => st.items.has(p));
+    st.config.open = keep;
+    st.view.dirty = true;
+    st.view.save();
   }
 
   // ---------- panel skeleton ----------
@@ -442,7 +473,7 @@ export default class FullBacklinksPlugin extends Plugin {
 
     const st: PanelState = {
       el, listEl, countEl, filterBtn, sortBtn, filterPanel, sortPanel, component,
-      signature: "", collapsed: false, opened: new Set(), items: new Map(),
+      signature: "", collapsed: false, opened: new Set(config.open), openOrder: [...config.open].reverse(), items: new Map(),
       propDefs: [...FILE_PROPS], types: new Map(), search: "", emptyEl,
       titleEl, queryInput, titleInput, reqId: 0, error: "", config, view: vs,
       renderEditors: () => {
@@ -521,7 +552,7 @@ export default class FullBacklinksPlugin extends Plugin {
   private parseList(raw: unknown): Settings[] {
     const arr = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
     const out = arr.map((e: any) =>
-      this.parseConfig({ title: e?.title, filter: this.jsonish(e?.filter), sort: this.jsonish(e?.sort), query: e?.query })
+      this.parseConfig({ title: e?.title, filter: this.jsonish(e?.filter), sort: this.jsonish(e?.sort), query: e?.query, open: this.jsonish(e?.open) })
     );
     return out.length ? out : [defaults()];
   }
@@ -554,6 +585,7 @@ export default class FullBacklinksPlugin extends Plugin {
         vs.panes[i].config = cfg;
         vs.panes[i].queryInput.value = cfg.query;
         vs.panes[i].titleInput.value = cfg.title;
+        this.syncOpen(vs.panes[i]);
         vs.panes[i].updateButtons();
         if (!switched) { vs.panes[i].renderEditors(); this.applyView(vs.panes[i]); }
       } else {
@@ -581,7 +613,10 @@ export default class FullBacklinksPlugin extends Plugin {
       : d.sorts;
     const query = typeof r.query === "string" ? r.query.trim() : "";
     const title = typeof r.title === "string" || typeof r.title === "number" ? String(r.title).trim() : "";
-    return { title, filter, sorts, query };
+    const open = Array.isArray(r.open)
+      ? [...new Set(r.open.filter((x: unknown): x is string => typeof x === "string" && x !== ""))].slice(0, MAX_OPEN_SAVED)
+      : [];
+    return { title, filter, sorts, query, open };
   }
 
   private sanitizeGroup(x: any): Group | null {
@@ -610,6 +645,7 @@ export default class FullBacklinksPlugin extends Plugin {
       filter: JSON.parse(JSON.stringify(p.config.filter)),
       sort: JSON.parse(JSON.stringify(p.config.sorts)),
       query: p.config.query,
+      open: p.config.open,
     })));
     const allDefault = list.length === 1 && JSON.stringify(list[0]) === JSON.stringify(def);
     vs.savedJson = JSON.stringify(list);
@@ -622,6 +658,7 @@ export default class FullBacklinksPlugin extends Plugin {
         filter: JSON.stringify(c.filter) === JSON.stringify(def.filter) ? null : JSON.stringify(c.filter),
         sort: JSON.stringify(c.sorts) === JSON.stringify(def.sorts) ? null : JSON.stringify(c.sorts),
         query: c.query || null,
+        open: c.open.length ? c.open : null,
       }));
     });
   }
@@ -957,15 +994,38 @@ export default class FullBacklinksPlugin extends Plugin {
     st: PanelState, src: TFile, sig: string,
     props: Record<string, string[]>, lists: Set<string>, tags: string[]
   ): ItemState {
-    const { el, comp } = this.buildCard(st.listEl, src, st.component, st.opened);
-    return { file: src, sig, el, comp, props, lists, tags };
+    const { el, comp, setOpen } = this.buildCard(st.listEl, src, st.component, st.opened,
+      (path, open) => this.cardToggled(st, path, open));
+    return { file: src, sig, el, comp, setOpen, props, lists, tags };
+  }
+
+  /** The user expanded or collapsed a card: update recency and persist the most recent MAX_OPEN_SAVED. */
+  private cardToggled(st: PanelState, path: string, open: boolean) {
+    st.openOrder = st.openOrder.filter((p) => p !== path);
+    if (open) st.openOrder.push(path);
+    // drop remembered cards that are no longer in this pane (only once the pane has loaded its notes)
+    if (st.items.size && !st.error) st.openOrder = st.openOrder.filter((p) => st.items.has(p));
+    st.config.open = st.openOrder.slice(-MAX_OPEN_SAVED).reverse();
+    st.view.dirty = true;
+    st.view.save();
+  }
+
+  /** Frontmatter changed from outside: expand exactly the cards it lists. */
+  private syncOpen(st: PanelState) {
+    st.opened.clear(); // mutate in place: existing cards hold a reference to this set
+    for (const p of st.config.open) st.opened.add(p);
+    st.openOrder = [...st.config.open].reverse();
+    for (const it of st.items.values()) void it.setOpen(st.opened.has(it.file.path));
   }
 
   /**
    * A full-note collapsible card. It starts collapsed unless its path is in `opened`, and the note is only
    * read and rendered when the card is first expanded, so large panes stay cheap.
    */
-  private buildCard(parentEl: HTMLElement, src: TFile, parentComp: Component, opened: Set<string>) {
+  private buildCard(
+    parentEl: HTMLElement, src: TFile, parentComp: Component, opened: Set<string>,
+    onToggle?: (path: string, open: boolean) => void,
+  ) {
     const comp = new Component();
     parentComp.addChild(comp);
 
@@ -1005,10 +1065,11 @@ export default class FullBacklinksPlugin extends Plugin {
       const willOpen = item.hasClass("is-collapsed");
       if (willOpen) opened.add(src.path); else opened.delete(src.path);
       void setOpen(willOpen);
+      onToggle?.(src.path, willOpen);
     });
     void setOpen(opened.has(src.path));
 
-    return { el: item, comp };
+    return { el: item, comp, setOpen };
   }
 
   // ---------- public API (for DataviewJS) ----------
