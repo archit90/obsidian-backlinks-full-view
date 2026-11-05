@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-backlinks-full-view",
+  "name": "Backlinks Full View",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.4",
+  "description": "Shows backlinked notes in full, in collapsible sections below the current note.",
+  "author": "Archit",
+  "isDesktopOnly": false
+}
