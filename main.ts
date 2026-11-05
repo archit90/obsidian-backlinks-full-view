@@ -18,9 +18,10 @@ interface Rule { type: "rule"; prop: string; op: string; value: string }
 interface Group { type: "group"; mode: "and" | "or" | "not"; children: Node[] }
 type Node = Rule | Group;
 interface SortRule { prop: string; dir: "asc" | "desc" }
-interface Settings { filter: Group; sorts: SortRule[]; query: string }
+interface Settings { title: string; filter: Group; sorts: SortRule[]; query: string }
 
 const defaults = (): Settings => ({
+  title: "", // pane heading; falls back to "Backlinks" or "Query"
   filter: { type: "group", mode: "and", children: [] },
   sorts: [{ prop: "file.name", dir: "asc" }],
   query: "", // optional Dataview query that supplies the notes instead of backlinks
@@ -77,7 +78,7 @@ interface PanelState {
   component: Component;
   signature: string;
   collapsed: boolean;
-  closed: Set<string>;
+  opened: Set<string>;             // cards the user expanded; every other card starts collapsed
   items: Map<string, ItemState>;
   propDefs: PropDef[];
   types: Map<string, PropType>;
@@ -87,6 +88,7 @@ interface PanelState {
   updateButtons: () => void;
   titleEl: HTMLElement;
   queryInput: HTMLInputElement;
+  titleInput: HTMLInputElement;
   reqId: number;                    // guards against out-of-order async query results
   error: string;                    // Dataview query error, shown in place of the list
   config: Settings;                 // this pane's filter/sort (stored as one entry of the note's `backlinks` list)
@@ -287,8 +289,9 @@ export default class FullBacklinksPlugin extends Plugin {
 
   private updateTitles(vs: ViewState) {
     vs.panes.forEach((p, i) => {
+      const title = p.config.title.trim();
       const base = p.config.query ? "Query" : "Backlinks";
-      p.titleEl.setText(vs.panes.length > 1 ? `${base} · ${i + 1}` : base);
+      p.titleEl.setText(title || (vs.panes.length > 1 ? `${base} · ${i + 1}` : base));
     });
   }
 
@@ -423,6 +426,10 @@ export default class FullBacklinksPlugin extends Plugin {
     const searchInput = bar.createEl("input", {
       cls: "bfv-filter", type: "text", placeholder: "Search backlinks…",
     });
+    const titleInput = body.createEl("input", {
+      cls: "bfv-query bfv-title-input", type: "text", placeholder: "Pane title (optional)",
+    });
+    titleInput.value = config.title;
     const queryInput = body.createEl("input", {
       cls: "bfv-query", type: "text",
       placeholder: 'Dataview query (optional, replaces backlinks) e.g. LIST FROM "Projects" WHERE status = "active"',
@@ -435,9 +442,9 @@ export default class FullBacklinksPlugin extends Plugin {
 
     const st: PanelState = {
       el, listEl, countEl, filterBtn, sortBtn, filterPanel, sortPanel, component,
-      signature: "", collapsed: false, closed: new Set(), items: new Map(),
+      signature: "", collapsed: false, opened: new Set(), items: new Map(),
       propDefs: [...FILE_PROPS], types: new Map(), search: "", emptyEl,
-      titleEl, queryInput, reqId: 0, error: "", config, view: vs,
+      titleEl, queryInput, titleInput, reqId: 0, error: "", config, view: vs,
       renderEditors: () => {
         if (!filterPanel.hasClass("bfv-hidden")) this.renderFilterEditor(st);
         if (!sortPanel.hasClass("bfv-hidden")) this.renderSortEditor(st);
@@ -478,6 +485,13 @@ export default class FullBacklinksPlugin extends Plugin {
       this.updatePane(st);
     }, 600, true);
     queryInput.addEventListener("input", onQuery);
+    const onTitle = debounce(() => {
+      st.config.title = titleInput.value.trim();
+      st.view.dirty = true;
+      st.view.save();
+      this.updateTitles(st.view);
+    }, 400, true);
+    titleInput.addEventListener("input", onTitle);
     rmBtn.addEventListener("click", (e) => { e.stopPropagation(); this.removePane(vs, st); });
     st.updateButtons();
     return st;
@@ -497,15 +511,17 @@ export default class FullBacklinksPlugin extends Plugin {
   // ---------- persistence in the note's frontmatter ----------
   //
   // backlinks:
-  //   - filter: '<one-line JSON>'
+  //   - title: Logs
+  //     filter: '<one-line JSON>'
   //     sort: '<one-line JSON>'
+  //     query: 'LIST FROM ...'
   //   - filter:
   //     sort:
 
   private parseList(raw: unknown): Settings[] {
     const arr = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
     const out = arr.map((e: any) =>
-      this.parseConfig({ filter: this.jsonish(e?.filter), sort: this.jsonish(e?.sort), query: e?.query })
+      this.parseConfig({ title: e?.title, filter: this.jsonish(e?.filter), sort: this.jsonish(e?.sort), query: e?.query })
     );
     return out.length ? out : [defaults()];
   }
@@ -537,6 +553,7 @@ export default class FullBacklinksPlugin extends Plugin {
       if (vs.panes[i]) {
         vs.panes[i].config = cfg;
         vs.panes[i].queryInput.value = cfg.query;
+        vs.panes[i].titleInput.value = cfg.title;
         vs.panes[i].updateButtons();
         if (!switched) { vs.panes[i].renderEditors(); this.applyView(vs.panes[i]); }
       } else {
@@ -563,7 +580,8 @@ export default class FullBacklinksPlugin extends Plugin {
           .map((x: any): SortRule => ({ prop: x.prop, dir: x.dir === "desc" ? "desc" : "asc" }))
       : d.sorts;
     const query = typeof r.query === "string" ? r.query.trim() : "";
-    return { filter, sorts, query };
+    const title = typeof r.title === "string" || typeof r.title === "number" ? String(r.title).trim() : "";
+    return { title, filter, sorts, query };
   }
 
   private sanitizeGroup(x: any): Group | null {
@@ -588,6 +606,7 @@ export default class FullBacklinksPlugin extends Plugin {
     const def = defaults();
     // canonical form: what parseList will read back, so our own write is recognised as a no-op
     const list = this.parseList(vs.panes.map((p) => ({
+      title: p.config.title,
       filter: JSON.parse(JSON.stringify(p.config.filter)),
       sort: JSON.parse(JSON.stringify(p.config.sorts)),
       query: p.config.query,
@@ -599,6 +618,7 @@ export default class FullBacklinksPlugin extends Plugin {
     await this.app.fileManager.processFrontMatter(file, (fm) => {
       if (allDefault) { delete fm.backlinks; return; }
       fm.backlinks = list.map((c) => ({
+        title: c.title || null,
         filter: JSON.stringify(c.filter) === JSON.stringify(def.filter) ? null : JSON.stringify(c.filter),
         sort: JSON.stringify(c.sorts) === JSON.stringify(def.sorts) ? null : JSON.stringify(c.sorts),
         query: c.query || null,
@@ -937,12 +957,15 @@ export default class FullBacklinksPlugin extends Plugin {
     st: PanelState, src: TFile, sig: string,
     props: Record<string, string[]>, lists: Set<string>, tags: string[]
   ): ItemState {
-    const { el, comp } = this.buildCard(st.listEl, src, st.component, st.closed);
+    const { el, comp } = this.buildCard(st.listEl, src, st.component, st.opened);
     return { file: src, sig, el, comp, props, lists, tags };
   }
 
-  /** A full-note collapsible card. `closed` remembers collapsed notes by path. */
-  private buildCard(parentEl: HTMLElement, src: TFile, parentComp: Component, closed: Set<string>) {
+  /**
+   * A full-note collapsible card. It starts collapsed unless its path is in `opened`, and the note is only
+   * read and rendered when the card is first expanded, so large panes stay cheap.
+   */
+  private buildCard(parentEl: HTMLElement, src: TFile, parentComp: Component, opened: Set<string>) {
     const comp = new Component();
     parentComp.addChild(comp);
 
@@ -980,10 +1003,10 @@ export default class FullBacklinksPlugin extends Plugin {
     };
     ih.addEventListener("click", () => {
       const willOpen = item.hasClass("is-collapsed");
-      if (willOpen) closed.delete(src.path); else closed.add(src.path);
+      if (willOpen) opened.add(src.path); else opened.delete(src.path);
       void setOpen(willOpen);
     });
-    void setOpen(!closed.has(src.path));
+    void setOpen(opened.has(src.path));
 
     return { el: item, comp };
   }
@@ -1021,7 +1044,7 @@ export default class FullBacklinksPlugin extends Plugin {
 
       const limit = opts.limit ?? DEFAULT_EMBED_LIMIT;
       let total = 0;
-      const closed = new Set<string>();
+      const opened = new Set<string>();
       const seen = new Set<string>();
       for (const p of arr) {
         const path: string | undefined = typeof p === "string" ? p : p?.file?.path ?? p?.path;
@@ -1032,8 +1055,8 @@ export default class FullBacklinksPlugin extends Plugin {
         seen.add(f.path);
         total++;
         if (total > limit) continue; // counted, not rendered
-        if (opts.collapsed) closed.add(f.path);
-        this.buildCard(wrap, f, parentComp, closed);
+        if (!opts.collapsed) opened.add(f.path); // bfv.embed() keeps opening cards unless asked not to
+        this.buildCard(wrap, f, parentComp, opened);
       }
       if (total > limit) {
         wrap.createDiv({ cls: "bfv-empty", text: `Showing ${limit} of ${total} notes. Pass { limit: N } to show more.` });
