@@ -57,12 +57,17 @@
 .bfv-icon-btn { padding: 0 8px; background: transparent; box-shadow: none; color: var(--text-muted, #888); }
 .bfv-icon-btn:hover { color: var(--text-normal, inherit); }
 
+/* Fills the note's sizer (.cm-sizer / .markdown-preview-sizer), which Obsidian caps at --file-line-width only
+   while "Readable line length" is on, so the panel is exactly as wide as the note's text either way. */
 .bfv-container {
   margin-top: 3rem;
-  width: var(--file-line-width, 700px);
+  width: 100%;
   max-width: 100%;
   margin-inline: auto;
 }
+/* fallback hosts (outside the sizer) follow the same setting */
+.markdown-source-view.is-readable-line-width .cm-scroller > .bfv-container,
+.markdown-preview-view.is-readable-line-width > .bfv-container { max-width: var(--file-line-width); }
 .bfv-add { margin-top: 4px; }
 .bfv-remove { margin-left: auto; }
 .bfv-query { width: 100%; margin: 4px 0; }

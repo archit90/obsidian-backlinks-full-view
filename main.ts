@@ -365,6 +365,7 @@ export default class FullBacklinksPlugin extends Plugin {
       const pane = this.createPanel(vs, defaults());
       vs.panes.push(pane);
       this.updateTitles(vs);
+      (pane.el.querySelector(".bfv-header") as HTMLElement | null)?.click(); // a pane just added starts expanded
       if (file instanceof TFile) this.refreshPane(pane, file, this.getBacklinkSources(file));
       vs.dirty = true;
       vs.save();
@@ -436,7 +437,8 @@ export default class FullBacklinksPlugin extends Plugin {
   }
 
   private refreshPane(st: PanelState, file: TFile, backlinks: TFile[]) {
-    if (st.deferred) { st.countEl.setText(String(backlinks.length)); return; }
+    // collapsed and never expanded: show the backlink count only (a query pane's count needs the query run)
+    if (st.deferred) { st.countEl.setText(st.config.query.trim() ? "" : String(backlinks.length)); return; }
     const q = st.config.query.trim();
     const id = ++st.reqId;
     if (!q) {
@@ -558,7 +560,8 @@ export default class FullBacklinksPlugin extends Plugin {
 
     const st: PanelState = {
       el, listEl, countEl, filterBtn, sortBtn, filterPanel, sortPanel, component,
-      signature: "", collapsed: ephemeral, ephemeral, deferred: ephemeral, opened: new Set(config.open), openOrder: [...config.open].reverse(), items: new Map(),
+      // every pane starts collapsed and is built on first expand
+      signature: "", collapsed: true, ephemeral, deferred: true, opened: new Set(config.open), openOrder: [...config.open].reverse(), items: new Map(),
       propDefs: [...FILE_PROPS], types: new Map(), search: "", emptyEl,
       fullText: false, searchId: 0, itemsVersion: 0, sortedKey: "",
       titleEl, queryInput, titleInput, reqId: 0, error: "", config, view: vs,

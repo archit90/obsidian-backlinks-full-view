@@ -372,10 +372,12 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       save: (0, import_obsidian.debounce)(() => void this.writeConfig(vs), 600, true)
     };
     addBtn.addEventListener("click", () => {
+      var _a;
       const file = vs.notePath ? this.app.vault.getAbstractFileByPath(vs.notePath) : null;
       const pane = this.createPanel(vs, defaults());
       vs.panes.push(pane);
       this.updateTitles(vs);
+      (_a = pane.el.querySelector(".bfv-header")) == null ? void 0 : _a.click();
       if (file instanceof import_obsidian.TFile) this.refreshPane(pane, file, this.getBacklinkSources(file));
       vs.dirty = true;
       vs.save();
@@ -441,7 +443,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   }
   refreshPane(st, file, backlinks) {
     if (st.deferred) {
-      st.countEl.setText(String(backlinks.length));
+      st.countEl.setText(st.config.query.trim() ? "" : String(backlinks.length));
       return;
     }
     const q = st.config.query.trim();
@@ -585,10 +587,11 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       filterPanel,
       sortPanel,
       component,
+      // every pane starts collapsed and is built on first expand
       signature: "",
-      collapsed: ephemeral,
+      collapsed: true,
       ephemeral,
-      deferred: ephemeral,
+      deferred: true,
       opened: new Set(config.open),
       openOrder: [...config.open].reverse(),
       items: /* @__PURE__ */ new Map(),
