@@ -1,5 +1,6 @@
 import {
   Component,
+  Keymap,
   MarkdownRenderer,
   MarkdownView,
   Notice,
@@ -9,6 +10,7 @@ import {
 } from "obsidian";
 
 const PANEL_CLASS = "bfv-panel";
+const HOVER_SOURCE = "backlinks-full-view"; // Settings → Page preview lists it as "Backlinks Full View"
 const DEFAULT_EMBED_LIMIT = 25; // max notes rendered per bfv.embed() call
 const MAX_EMBED_DEPTH = 3;      // max nesting of embeds inside embeds
 const MAX_OPEN_SAVED = 50;      // expanded cards remembered per pane in frontmatter, most recent first
@@ -148,6 +150,7 @@ export default class FullBacklinksPlugin extends Plugin {
   async onload() {
     // short global for DataviewJS:  bfv.embed(dv, dv.pages("#x"))
     (window as any).bfv = this.api;
+    this.registerHoverLinkSource(HOVER_SOURCE, { display: "Backlinks Full View", defaultMod: true });
     this.addCommand({
       id: "diagnostics",
       name: "Show diagnostics",
@@ -274,6 +277,7 @@ export default class FullBacklinksPlugin extends Plugin {
 
   private createViewState(host: HTMLElement): ViewState {
     const el = host.createDiv({ cls: "bfv-container" });
+    this.wireLinks(el);
     const addBtn = el.createEl("button", { cls: "bfv-add", text: "+ Add backlinks pane" });
     const vs: ViewState = {
       el, addBtn, panes: [], notePath: null, savedJson: "", dirty: false, graceUntil: 0,
@@ -1019,6 +1023,46 @@ export default class FullBacklinksPlugin extends Plugin {
   }
 
   /**
+   * Internal links anywhere under `el` (card titles and links inside rendered notes) follow Obsidian's
+   * conventions: click opens in place, Ctrl/Cmd-click or middle-click opens a new tab, Ctrl+Alt a split,
+   * Ctrl+Alt+Shift a new window, and hovering with Ctrl shows Page preview.
+   * Needed because in editing modes Obsidian only wires up links inside CodeMirror's contentDOM, and the
+   * panel lives outside it (in .cm-sizer), so links rendered in cards would otherwise do nothing.
+   */
+  private wireLinks(el: HTMLElement) {
+    const hoverParent = { hoverPopover: null as any };
+    const linkOf = (evt: Event) => {
+      const a = (evt.target as HTMLElement | null)?.closest?.("a.internal-link") as HTMLElement | null;
+      return a && el.contains(a) ? a : null;
+    };
+    const sourceOf = (a: HTMLElement) => a.closest("[data-bfv-path]")?.getAttribute("data-bfv-path") ?? "";
+    const open = (evt: MouseEvent, a: HTMLElement, newLeaf: ReturnType<typeof Keymap.isModEvent>) => {
+      const href = a.getAttribute("data-href") ?? a.getAttribute("href");
+      if (!href) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      void this.app.workspace.openLinkText(href, sourceOf(a), newLeaf);
+    };
+    el.addEventListener("click", (evt) => {
+      const a = linkOf(evt);
+      if (a) open(evt, a, Keymap.isModEvent(evt));
+    });
+    el.addEventListener("auxclick", (evt) => {
+      const a = linkOf(evt);
+      if (a && evt.button === 1) open(evt, a, "tab");
+    });
+    el.addEventListener("mouseover", (evt) => {
+      const a = linkOf(evt);
+      if (!a) return;
+      const href = a.getAttribute("data-href") ?? a.getAttribute("href");
+      if (!href) return;
+      this.app.workspace.trigger("hover-link", {
+        event: evt, source: HOVER_SOURCE, hoverParent, targetEl: a, linktext: href, sourcePath: sourceOf(a),
+      });
+    });
+  }
+
+  /**
    * A full-note collapsible card. It starts collapsed unless its path is in `opened`, and the note is only
    * read and rendered when the card is first expanded, so large panes stay cheap.
    */
@@ -1033,13 +1077,9 @@ export default class FullBacklinksPlugin extends Plugin {
     item.setAttr("data-bfv-path", src.path);
     const ih = item.createDiv({ cls: "bfv-item-header" });
     const ichev = ih.createSpan({ cls: "bfv-chevron" });
-    const link = ih.createEl("a", {
+    ih.createEl("a", {
       cls: "bfv-item-title internal-link", text: src.basename, href: src.path,
-    });
-    link.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      void this.app.workspace.getLeaf(e.ctrlKey || e.metaKey ? "tab" : false).openFile(src);
+      attr: { "data-href": src.path },
     });
     const folder = src.parent && src.parent.path !== "/" ? src.parent.path : "";
     if (folder) ih.createSpan({ cls: "bfv-item-path", text: folder + "/" });
@@ -1061,7 +1101,8 @@ export default class FullBacklinksPlugin extends Plugin {
         }
       }
     };
-    ih.addEventListener("click", () => {
+    ih.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).closest("a")) return; // the title link navigates; it doesn't toggle
       const willOpen = item.hasClass("is-collapsed");
       if (willOpen) opened.add(src.path); else opened.delete(src.path);
       void setOpen(willOpen);
@@ -1088,6 +1129,7 @@ export default class FullBacklinksPlugin extends Plugin {
         : Array.isArray(pages?.values) ? pages.values : Array.from(pages ?? []);
 
       const wrap = container.createDiv({ cls: "bfv-embeds" });
+      this.wireLinks(wrap);
 
       // Cycle guard: never embed a note that is already being rendered above us
       // (the note holding this block, or any card this block sits inside).

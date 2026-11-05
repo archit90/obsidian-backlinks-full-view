@@ -25,6 +25,7 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
 var PANEL_CLASS = "bfv-panel";
+var HOVER_SOURCE = "backlinks-full-view";
 var DEFAULT_EMBED_LIMIT = 25;
 var MAX_EMBED_DEPTH = 3;
 var MAX_OPEN_SAVED = 50;
@@ -107,6 +108,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         const sourcePath = (_c = (_b = opts.sourcePath) != null ? _b : target == null ? void 0 : target.currentFilePath) != null ? _c : "";
         const arr = Array.isArray(pages) ? pages : Array.isArray(pages == null ? void 0 : pages.values) ? pages.values : Array.from(pages != null ? pages : []);
         const wrap = container.createDiv({ cls: "bfv-embeds" });
+        this.wireLinks(wrap);
         const ancestors = /* @__PURE__ */ new Set();
         if (sourcePath) ancestors.add(sourcePath);
         let depth = 0;
@@ -143,6 +145,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   }
   async onload() {
     window.bfv = this.api;
+    this.registerHoverLinkSource(HOVER_SOURCE, { display: "Backlinks Full View", defaultMod: true });
     this.addCommand({
       id: "diagnostics",
       name: "Show diagnostics",
@@ -270,6 +273,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   }
   createViewState(host) {
     const el = host.createDiv({ cls: "bfv-container" });
+    this.wireLinks(el);
     const addBtn = el.createEl("button", { cls: "bfv-add", text: "+ Add backlinks pane" });
     const vs = {
       el,
@@ -1072,6 +1076,56 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     for (const it of st.items.values()) void it.setOpen(st.opened.has(it.file.path));
   }
   /**
+   * Internal links anywhere under `el` (card titles and links inside rendered notes) follow Obsidian's
+   * conventions: click opens in place, Ctrl/Cmd-click or middle-click opens a new tab, Ctrl+Alt a split,
+   * Ctrl+Alt+Shift a new window, and hovering with Ctrl shows Page preview.
+   * Needed because in editing modes Obsidian only wires up links inside CodeMirror's contentDOM, and the
+   * panel lives outside it (in .cm-sizer), so links rendered in cards would otherwise do nothing.
+   */
+  wireLinks(el) {
+    const hoverParent = { hoverPopover: null };
+    const linkOf = (evt) => {
+      var _a, _b;
+      const a = (_b = (_a = evt.target) == null ? void 0 : _a.closest) == null ? void 0 : _b.call(_a, "a.internal-link");
+      return a && el.contains(a) ? a : null;
+    };
+    const sourceOf = (a) => {
+      var _a, _b;
+      return (_b = (_a = a.closest("[data-bfv-path]")) == null ? void 0 : _a.getAttribute("data-bfv-path")) != null ? _b : "";
+    };
+    const open = (evt, a, newLeaf) => {
+      var _a;
+      const href = (_a = a.getAttribute("data-href")) != null ? _a : a.getAttribute("href");
+      if (!href) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      void this.app.workspace.openLinkText(href, sourceOf(a), newLeaf);
+    };
+    el.addEventListener("click", (evt) => {
+      const a = linkOf(evt);
+      if (a) open(evt, a, import_obsidian.Keymap.isModEvent(evt));
+    });
+    el.addEventListener("auxclick", (evt) => {
+      const a = linkOf(evt);
+      if (a && evt.button === 1) open(evt, a, "tab");
+    });
+    el.addEventListener("mouseover", (evt) => {
+      var _a;
+      const a = linkOf(evt);
+      if (!a) return;
+      const href = (_a = a.getAttribute("data-href")) != null ? _a : a.getAttribute("href");
+      if (!href) return;
+      this.app.workspace.trigger("hover-link", {
+        event: evt,
+        source: HOVER_SOURCE,
+        hoverParent,
+        targetEl: a,
+        linktext: href,
+        sourcePath: sourceOf(a)
+      });
+    });
+  }
+  /**
    * A full-note collapsible card. It starts collapsed unless its path is in `opened`, and the note is only
    * read and rendered when the card is first expanded, so large panes stay cheap.
    */
@@ -1082,15 +1136,11 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     item.setAttr("data-bfv-path", src.path);
     const ih = item.createDiv({ cls: "bfv-item-header" });
     const ichev = ih.createSpan({ cls: "bfv-chevron" });
-    const link = ih.createEl("a", {
+    ih.createEl("a", {
       cls: "bfv-item-title internal-link",
       text: src.basename,
-      href: src.path
-    });
-    link.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      void this.app.workspace.getLeaf(e.ctrlKey || e.metaKey ? "tab" : false).openFile(src);
+      href: src.path,
+      attr: { "data-href": src.path }
     });
     const folder = src.parent && src.parent.path !== "/" ? src.parent.path : "";
     if (folder) ih.createSpan({ cls: "bfv-item-path", text: folder + "/" });
@@ -1110,7 +1160,8 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         }
       }
     };
-    ih.addEventListener("click", () => {
+    ih.addEventListener("click", (e) => {
+      if (e.target.closest("a")) return;
       const willOpen = item.hasClass("is-collapsed");
       if (willOpen) opened.add(src.path);
       else opened.delete(src.path);
