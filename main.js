@@ -87,6 +87,87 @@ function normDate(s) {
   return t.slice(0, 10);
 }
 var DATE_RE = /^\d{4}-\d{2}-\d{2}/;
+function parseSearch(q) {
+  const toks = [];
+  const re = /\s*(?:(\()|(\))|"([^"]*)"?|(-?)([^\s()"]+))/y;
+  let m;
+  while (re.lastIndex < q.length && (m = re.exec(q))) {
+    if (m[1]) toks.push("(");
+    else if (m[2]) toks.push(")");
+    else if (m[3] !== void 0) {
+      if (m[3].trim()) toks.push("t:" + m[3].toLowerCase());
+    } else if (m[5]) {
+      if (m[4]) toks.push("NOT");
+      toks.push(["AND", "OR", "NOT"].includes(m[5]) && !m[4] ? m[5] : "t:" + m[5].toLowerCase());
+    }
+  }
+  let i = 0;
+  const atom = () => {
+    const tk = toks[i];
+    if (tk === void 0) return null;
+    if (tk === "NOT") {
+      i++;
+      const c = atom();
+      return c ? { t: "not", c } : null;
+    }
+    if (tk === "(") {
+      i++;
+      const e = or();
+      if (toks[i] === ")") i++;
+      return e;
+    }
+    if (tk.startsWith("t:")) {
+      i++;
+      return { t: "term", v: tk.slice(2) };
+    }
+    return null;
+  };
+  const and = () => {
+    const c = [];
+    while (i < toks.length && toks[i] !== "OR" && toks[i] !== ")") {
+      if (toks[i] === "AND") {
+        i++;
+        continue;
+      }
+      const a = atom();
+      if (a) c.push(a);
+      else if (toks[i] !== "OR" && toks[i] !== ")") i++;
+    }
+    return c.length === 0 ? null : c.length === 1 ? c[0] : { t: "and", c };
+  };
+  const or = () => {
+    const c = [];
+    for (; ; ) {
+      const a = and();
+      if (a) c.push(a);
+      if (toks[i] === "OR") {
+        i++;
+        continue;
+      }
+      break;
+    }
+    return c.length === 0 ? null : c.length === 1 ? c[0] : { t: "or", c };
+  };
+  const out = [];
+  while (i < toks.length) {
+    const e = or();
+    if (e) out.push(e);
+    if (toks[i] === ")") i++;
+  }
+  return out.length === 0 ? null : out.length === 1 ? out[0] : { t: "and", c: out };
+}
+function evalSearch(n, has) {
+  switch (n.t) {
+    case "term":
+      return has(n.v);
+    case "not":
+      return !evalSearch(n.c, has);
+    case "and":
+      return n.c.every((c) => evalSearch(c, has));
+    case "or":
+      return n.c.some((c) => evalSearch(c, has));
+  }
+}
 var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
@@ -196,16 +277,17 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       const host = this.getHost(view);
       lines.push(`Active note (${view.getMode()}): host ${host ? "found <" + host.className.split(" ")[0] + ">" : "NOT found, using fallback"}`);
       const vs = this.views.get(view);
-      lines.push(vs ? `Panes: ${vs.panes.length}, attached: ${vs.el.isConnected}` : "No panes created for this note yet");
+      lines.push(vs ? `Panes: ${vs.panes.length} + All backlinks, attached: ${vs.el.isConnected}` : "No panes created for this note yet");
     } else lines.push("No active note.");
     return lines;
   }
   destroyView(view) {
-    var _a;
+    var _a, _b;
     const vs = this.views.get(view);
     if (!vs) return;
     (_a = vs.observer) == null ? void 0 : _a.disconnect();
     for (const p of vs.panes) p.component.unload();
+    (_b = vs.base) == null ? void 0 : _b.component.unload();
     vs.el.remove();
     this.views.delete(view);
     this.allViews.delete(vs);
@@ -279,6 +361,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       el,
       addBtn,
       panes: [],
+      base: null,
       notePath: null,
       savedJson: "",
       dirty: false,
@@ -312,9 +395,6 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     st.component.unload();
     st.el.remove();
     vs.panes.splice(i, 1);
-    if (!vs.panes.length) {
-      vs.panes.push(this.createPanel(vs, defaults()));
-    }
     this.updateTitles(vs);
     vs.dirty = true;
     vs.save();
@@ -335,6 +415,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     if (vs && vs.el.parentElement !== host) {
       host.appendChild(vs.el);
       vs.panes.forEach((p) => p.signature = "");
+      if (vs.base) vs.base.signature = "";
       this.watchHost(vs, host);
     }
     if (!vs) {
@@ -343,10 +424,14 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       this.allViews.add(vs);
       this.watchHost(vs, host);
     }
+    const switched = vs.notePath !== file.path;
     this.loadConfig(vs, file);
+    if (switched || !vs.base) this.resetBase(vs);
     vs.el.appendChild(vs.addBtn);
+    if (vs.el.firstChild !== vs.base.el) vs.el.prepend(vs.base.el);
     const sources = this.getBacklinkSources(file);
     for (const pane of vs.panes) this.refreshPane(pane, file, sources);
+    this.refreshPane(vs.base, file, sources);
   }
   updatePane(st) {
     const f = st.view.notePath ? this.app.vault.getAbstractFileByPath(st.view.notePath) : null;
@@ -355,6 +440,10 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     this.refreshPane(st, f, this.getBacklinkSources(f));
   }
   refreshPane(st, file, backlinks) {
+    if (st.deferred) {
+      st.countEl.setText(String(backlinks.length));
+      return;
+    }
     const q = st.config.query.trim();
     const id = ++st.reqId;
     if (!q) {
@@ -441,11 +530,10 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     for (const p of gone) st.opened.delete(p);
     st.openOrder = st.openOrder.filter((p) => st.items.has(p));
     st.config.open = keep;
-    st.view.dirty = true;
-    st.view.save();
+    this.persist(st);
   }
   // ---------- panel skeleton ----------
-  createPanel(vs, config) {
+  createPanel(vs, config, ephemeral = false) {
     const el = vs.el.createDiv({ cls: PANEL_CLASS });
     vs.el.appendChild(vs.addBtn);
     const component = new import_obsidian.Component();
@@ -466,8 +554,12 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     const searchInput = bar.createEl("input", {
       cls: "bfv-filter",
       type: "text",
-      placeholder: "Search backlinks\u2026"
+      placeholder: 'Search\u2026 (a b, a OR b, NOT a, "a phrase", ( ))',
+      attr: { title: 'Adjacent words must all match. Use OR, NOT (or -word), "quoted phrases" and parentheses; operators in capitals.' }
     });
+    const ftLabel = bar.createEl("label", { cls: "bfv-fulltext", attr: { title: "Also search the text of every note in this pane" } });
+    const ftBox = ftLabel.createEl("input", { type: "checkbox" });
+    ftLabel.appendText("Full text");
     const titleInput = body.createEl("input", {
       cls: "bfv-query bfv-title-input",
       type: "text",
@@ -494,7 +586,9 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       sortPanel,
       component,
       signature: "",
-      collapsed: false,
+      collapsed: ephemeral,
+      ephemeral,
+      deferred: ephemeral,
       opened: new Set(config.open),
       openOrder: [...config.open].reverse(),
       items: /* @__PURE__ */ new Map(),
@@ -502,6 +596,10 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       types: /* @__PURE__ */ new Map(),
       search: "",
       emptyEl,
+      fullText: false,
+      searchId: 0,
+      itemsVersion: 0,
+      sortedKey: "",
       titleEl,
       queryInput,
       titleInput,
@@ -529,8 +627,18 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     header.addEventListener("click", () => {
       st.collapsed = !st.collapsed;
       applyCollapse();
+      if (!st.collapsed && st.deferred) {
+        st.deferred = false;
+        this.updatePane(st);
+      }
     });
     applyCollapse();
+    if (ephemeral) {
+      el.addClass("bfv-base");
+      rmBtn.remove();
+      titleInput.remove();
+      queryInput.remove();
+    }
     filterBtn.addEventListener("click", () => {
       filterPanel.toggleClass("bfv-hidden", !filterPanel.hasClass("bfv-hidden"));
       st.renderEditors();
@@ -544,18 +652,20 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       this.applyView(st);
     }, 150, true);
     searchInput.addEventListener("input", onSearch);
+    ftBox.addEventListener("change", () => {
+      st.fullText = ftBox.checked;
+      this.applyView(st);
+    });
     const onQuery = (0, import_obsidian.debounce)(() => {
       st.config.query = queryInput.value.trim();
-      st.view.dirty = true;
-      st.view.save();
+      this.persist(st);
       this.updateTitles(st.view);
       this.updatePane(st);
     }, 600, true);
     queryInput.addEventListener("input", onQuery);
     const onTitle = (0, import_obsidian.debounce)(() => {
       st.config.title = titleInput.value.trim();
-      st.view.dirty = true;
-      st.view.save();
+      this.persist(st);
       this.updateTitles(st.view);
     }, 400, true);
     titleInput.addEventListener("input", onTitle);
@@ -567,10 +677,24 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     return st;
   }
   // ---------- config editing UI ----------
-  /** Called after any filter/sort edit. structural=true re-renders editors (including the source). */
-  configChanged(st, structural) {
+  /** Mark a pane's settings as changed and schedule a frontmatter write (never for the built-in pane). */
+  persist(st) {
+    if (st.ephemeral) return;
     st.view.dirty = true;
     st.view.save();
+  }
+  /** (Re)creates the built-in "All backlinks" pane (shown first): collapsed, unsaved, built on first expand. */
+  resetBase(vs) {
+    if (vs.base) {
+      vs.base.component.unload();
+      vs.base.el.remove();
+    }
+    vs.base = this.createPanel(vs, defaults(), true);
+    vs.base.titleEl.setText("All backlinks");
+  }
+  /** Called after any filter/sort edit. structural=true re-renders editors (including the source). */
+  configChanged(st, structural) {
+    this.persist(st);
     st.updateButtons();
     if (structural) st.renderEditors();
     this.applyView(st);
@@ -589,7 +713,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     const out = arr.map(
       (e) => this.parseConfig({ title: e == null ? void 0 : e.title, filter: this.jsonish(e == null ? void 0 : e.filter), sort: this.jsonish(e == null ? void 0 : e.sort), query: e == null ? void 0 : e.query, open: this.jsonish(e == null ? void 0 : e.open) })
     );
-    return out.length ? out : [defaults()];
+    return out;
   }
   loadConfig(vs, file) {
     var _a;
@@ -681,7 +805,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       query: p.config.query,
       open: p.config.open
     })));
-    const allDefault = list.length === 1 && JSON.stringify(list[0]) === JSON.stringify(def);
+    const allDefault = list.length === 0;
     vs.savedJson = JSON.stringify(list);
     vs.dirty = false;
     vs.graceUntil = Date.now() + 1500;
@@ -763,8 +887,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     const type = this.typeOf(st, rule.prop);
     if (!OPS[type].includes(rule.op)) {
       rule.op = OPS[type][0];
-      st.view.dirty = true;
-      st.view.save();
+      this.persist(st);
     }
     this.propSelect(row, st, rule.prop, (v) => {
       rule.prop = v;
@@ -860,7 +983,8 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       const sig = src.stat.mtime + JSON.stringify(fm);
       const old = st.items.get(src.path);
       if (old && old.sig === sig) {
-        Object.assign(old, { file: src, props, lists, tags });
+        if (old.file.path !== src.path) st.itemsVersion++;
+        Object.assign(old, { file: src, props, lists, tags, hay: void 0 });
         continue;
       }
       if (old) {
@@ -868,12 +992,14 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         old.el.remove();
       }
       st.items.set(src.path, this.createItem(st, src, sig, props, lists, tags));
+      st.itemsVersion++;
     }
     for (const [path, it] of st.items) {
       if (!seen.has(path)) {
         st.component.removeChild(it.comp);
         it.el.remove();
         st.items.delete(path);
+        st.itemsVersion++;
       }
     }
     const defs = [...FILE_PROPS];
@@ -1008,14 +1134,26 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     if (n.mode === "or") return res.some(Boolean);
     return !res.some(Boolean);
   }
-  matchesSearch(it, q) {
-    if (!q) return true;
-    const hay = [
+  /** Lower-cased path, tags and properties of a note: what a normal (not full-text) search looks in. */
+  hayOf(it) {
+    return [
       it.file.path,
       ...it.tags,
       ...Object.entries(it.props).flatMap(([k, vs]) => [k, ...vs])
     ].join("\n").toLowerCase();
-    return q.toLowerCase().split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
+  }
+  /** Reads (and caches, lower-cased) the text of notes for full-text search, 100 at a time. */
+  async loadBodies(items) {
+    for (let i = 0; i < items.length; i += 100) {
+      await Promise.all(items.slice(i, i + 100).map(async (it) => {
+        if (it.body !== void 0) return;
+        try {
+          it.body = (await this.app.vault.cachedRead(it.file)).toLowerCase();
+        } catch (e) {
+          it.body = "";
+        }
+      }));
+    }
   }
   compareItems(st, a, b) {
     for (const s of st.config.sorts) {
@@ -1036,16 +1174,54 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     }
     return a.file.path.localeCompare(b.file.path);
   }
+  /**
+   * Sort, search and filter a pane. The DOM is only reordered when the sort or the set of notes changes;
+   * a search or filter change just toggles visibility on the cards whose visibility actually changed.
+   */
   applyView(st) {
     const all = [...st.items.values()];
-    const visible = all.filter((it) => this.matchesSearch(it, st.search.trim()) && this.evalNode(st, it, st.config.filter)).sort((a, b) => this.compareItems(st, a, b));
-    const vis = new Set(visible);
-    for (const it of all) it.el.toggleClass("bfv-hidden", !vis.has(it));
-    for (const it of visible) st.listEl.appendChild(it.el);
-    const filtered = st.search.trim() !== "" || this.countRules(st.config.filter) > 0;
-    st.countEl.setText(filtered ? `${visible.length} / ${all.length}` : String(all.length));
+    const sortKey = JSON.stringify(st.config.sorts) + "|" + st.itemsVersion;
+    if (sortKey !== st.sortedKey) {
+      all.sort((a, b) => this.compareItems(st, a, b));
+      const frag = document.createDocumentFragment();
+      for (const it of all) frag.appendChild(it.el);
+      st.listEl.appendChild(frag);
+      st.sortedKey = sortKey;
+    }
+    const q = st.search.trim();
+    const tree = q ? parseSearch(q) : null;
+    const id = ++st.searchId;
+    if (tree && st.fullText) {
+      const missing = all.filter((it) => it.body === void 0);
+      if (missing.length) {
+        st.countEl.setText(`Reading ${missing.length} notes\u2026`);
+        void this.loadBodies(missing).then(() => {
+          if (id === st.searchId) this.showMatches(st, all, tree, q);
+        });
+        return;
+      }
+    }
+    this.showMatches(st, all, tree, q);
+  }
+  showMatches(st, all, tree, q) {
+    var _a;
+    let shown = 0;
+    for (const it of all) {
+      let ok = true;
+      if (tree) {
+        if (it.hay === void 0) it.hay = this.hayOf(it);
+        const hay = it.hay;
+        const body = st.fullText ? (_a = it.body) != null ? _a : "" : "";
+        ok = evalSearch(tree, (t) => hay.includes(t) || body !== "" && body.includes(t));
+      }
+      if (ok) ok = this.evalNode(st, it, st.config.filter);
+      if (ok) shown++;
+      if (it.el.hasClass("bfv-hidden") === ok) it.el.toggleClass("bfv-hidden", !ok);
+    }
+    const filtered = q !== "" || this.countRules(st.config.filter) > 0;
+    st.countEl.setText(filtered ? `${shown} / ${all.length}` : String(all.length));
     st.emptyEl.setText(
-      st.error ? st.error : all.length === 0 ? st.config.query ? "No notes." : "No backlinks found." : visible.length === 0 ? "No notes match the filters." : ""
+      st.error ? st.error : all.length === 0 ? st.config.query ? "No notes." : "No backlinks found." : shown === 0 ? "No notes match the filters." : ""
     );
   }
   // ---------- cards ----------
@@ -1065,8 +1241,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     if (open) st.openOrder.push(path);
     if (st.items.size && !st.error) st.openOrder = st.openOrder.filter((p) => st.items.has(p));
     st.config.open = st.openOrder.slice(-MAX_OPEN_SAVED).reverse();
-    st.view.dirty = true;
-    st.view.save();
+    this.persist(st);
   }
   /** Frontmatter changed from outside: expand exactly the cards it lists. */
   syncOpen(st) {
@@ -1153,6 +1328,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         rendered = true;
         try {
           const text = await this.app.vault.cachedRead(src);
+          this.renderProperties(content, src);
           await import_obsidian.MarkdownRenderer.render(this.app, text, content, src.path, comp);
         } catch (e) {
           console.error("[backlinks-full-view] failed to render", src.path, e);
@@ -1170,5 +1346,57 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     });
     void setOpen(opened.has(src.path));
     return { el: item, comp, setOpen };
+  }
+  /**
+   * A compact, read-only properties table at the top of a card (MarkdownRenderer drops frontmatter).
+   * Wiki links become internal links, so the panel's click/hover handling applies to them. `backlinks`
+   * is pane config, not content, so it's left out.
+   */
+  renderProperties(el, src) {
+    var _a;
+    const fm = (_a = this.app.metadataCache.getFileCache(src)) == null ? void 0 : _a.frontmatter;
+    const keys = Object.keys(fm != null ? fm : {}).filter((k) => k !== "backlinks" && k !== "position");
+    if (!fm || !keys.length) return;
+    const table = el.createDiv({ cls: "bfv-props" });
+    const LINK = /^\[\[([^\]|#]+)(#[^\]|]*)?(?:\|([^\]]*))?\]\]$/;
+    const value = (cell, v, key) => {
+      var _a2, _b, _c, _d, _e;
+      if (v === null || v === void 0 || v === "") return;
+      if (typeof v === "string") {
+        const m = v.match(LINK);
+        if (m) {
+          const target = m[1] + ((_a2 = m[2]) != null ? _a2 : "");
+          const dest = this.app.metadataCache.getFirstLinkpathDest(m[1], src.path);
+          cell.createEl("a", {
+            cls: "internal-link" + (dest ? "" : " is-unresolved"),
+            text: (_e = m[3]) != null ? _e : ((_c = (_b = dest == null ? void 0 : dest.basename) != null ? _b : m[1].split("/").pop()) != null ? _c : m[1]) + ((_d = m[2]) != null ? _d : ""),
+            href: target,
+            attr: { "data-href": target }
+          });
+        } else if (key === "tags" || key === "tag") {
+          cell.createSpan({ cls: "tag", text: "#" + v.replace(/^#/, "") });
+        } else {
+          cell.createSpan({ text: v });
+        }
+      } else if (typeof v === "object") {
+        cell.createSpan({ text: JSON.stringify(v) });
+      } else {
+        cell.createSpan({ text: String(v) });
+      }
+    };
+    for (const k of keys) {
+      const row = table.createDiv({ cls: "bfv-prop" });
+      row.createDiv({ cls: "bfv-prop-key", text: k });
+      const cell = row.createDiv({ cls: "bfv-prop-value" });
+      const v = fm[k];
+      if (Array.isArray(v)) {
+        for (const x of v) {
+          const chip = cell.createSpan({ cls: "bfv-prop-chip" });
+          value(chip, x, k);
+        }
+      } else {
+        value(cell, v, k);
+      }
+    }
   }
 };

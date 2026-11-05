@@ -70,6 +70,8 @@ interface ItemState {
   props: Record<string, string[]>; // lower-cased key -> values
   lists: Set<string>;              // lower-cased keys whose value is an array
   tags: string[];
+  hay?: string;                    // lower-cased path + tags + properties, built on first search
+  body?: string;                   // lower-cased note text, read on first full-text search
 }
 
 interface PanelState {
@@ -89,6 +91,10 @@ interface PanelState {
   propDefs: PropDef[];
   types: Map<string, PropType>;
   search: string;
+  fullText: boolean;               // search note text as well (session only, not saved)
+  searchId: number;                // guards against out-of-order full-text loads
+  itemsVersion: number;            // bumped whenever items are added, replaced or removed
+  sortedKey: string;               // sorts + itemsVersion the current DOM order was built for
   emptyEl: HTMLElement;
   renderEditors: () => void;
   updateButtons: () => void;
@@ -97,6 +103,8 @@ interface PanelState {
   titleInput: HTMLInputElement;
   reqId: number;                    // guards against out-of-order async query results
   error: string;                    // Dataview query error, shown in place of the list
+  ephemeral: boolean;               // the built-in "All backlinks" pane: never written to frontmatter
+  deferred: boolean;                // built lazily: cards are created only once the pane is first expanded
   config: Settings;                 // this pane's filter/sort (stored as one entry of the note's `backlinks` list)
   view: ViewState;
 }
@@ -105,7 +113,8 @@ interface PanelState {
 interface ViewState {
   el: HTMLElement;
   addBtn: HTMLElement;
-  panes: PanelState[];
+  panes: PanelState[];             // the note's own panes, saved in its `backlinks` frontmatter
+  base: PanelState | null;          // built-in pane every note gets (plain backlinks, starts collapsed, not saved)
   notePath: string | null;
   savedJson: string;   // last config list known to be in the frontmatter
   dirty: boolean;      // local edits not yet written
@@ -141,6 +150,72 @@ function normDate(s: string): string {
   return t.slice(0, 10);
 }
 const DATE_RE = /^\d{4}-\d{2}-\d{2}/;
+
+// ---------- search query: terms, "quoted phrases", AND / OR / NOT (or -term), parentheses ----------
+//   maya standup             both terms (adjacent terms are ANDed)
+//   (billing AND v2) OR acme
+//   NOT draft   /   -draft
+// Operators are recognised in upper case only, so a lower-case "and" / "or" is searched as a word.
+// Precedence: NOT > AND > OR. Unbalanced parentheses are tolerated.
+type SearchNode =
+  | { t: "term"; v: string }
+  | { t: "not"; c: SearchNode }
+  | { t: "and" | "or"; c: SearchNode[] };
+
+function parseSearch(q: string): SearchNode | null {
+  const toks: string[] = [];
+  const re = /\s*(?:(\()|(\))|"([^"]*)"?|(-?)([^\s()"]+))/y;
+  let m: RegExpExecArray | null;
+  while (re.lastIndex < q.length && (m = re.exec(q))) {
+    if (m[1]) toks.push("(");
+    else if (m[2]) toks.push(")");
+    else if (m[3] !== undefined) { if (m[3].trim()) toks.push("t:" + m[3].toLowerCase()); }
+    else if (m[5]) {
+      if (m[4]) toks.push("NOT");
+      toks.push(["AND", "OR", "NOT"].includes(m[5]) && !m[4] ? m[5] : "t:" + m[5].toLowerCase());
+    }
+  }
+  let i = 0;
+  const atom = (): SearchNode | null => {
+    const tk = toks[i];
+    if (tk === undefined) return null;
+    if (tk === "NOT") { i++; const c = atom(); return c ? { t: "not", c } : null; }
+    if (tk === "(") { i++; const e = or(); if (toks[i] === ")") i++; return e; }
+    if (tk.startsWith("t:")) { i++; return { t: "term", v: tk.slice(2) }; }
+    return null; // a stray AND / OR / ")"
+  };
+  const and = (): SearchNode | null => {
+    const c: SearchNode[] = [];
+    while (i < toks.length && toks[i] !== "OR" && toks[i] !== ")") {
+      if (toks[i] === "AND") { i++; continue; }
+      const a = atom();
+      if (a) c.push(a); else if (toks[i] !== "OR" && toks[i] !== ")") i++;
+    }
+    return c.length === 0 ? null : c.length === 1 ? c[0] : { t: "and", c };
+  };
+  const or = (): SearchNode | null => {
+    const c: SearchNode[] = [];
+    for (;;) {
+      const a = and();
+      if (a) c.push(a);
+      if (toks[i] === "OR") { i++; continue; }
+      break;
+    }
+    return c.length === 0 ? null : c.length === 1 ? c[0] : { t: "or", c };
+  };
+  const out: SearchNode[] = [];
+  while (i < toks.length) { const e = or(); if (e) out.push(e); if (toks[i] === ")") i++; }
+  return out.length === 0 ? null : out.length === 1 ? out[0] : { t: "and", c: out };
+}
+
+function evalSearch(n: SearchNode, has: (term: string) => boolean): boolean {
+  switch (n.t) {
+    case "term": return has(n.v);
+    case "not": return !evalSearch(n.c, has);
+    case "and": return n.c.every((c) => evalSearch(c, has));
+    case "or": return n.c.some((c) => evalSearch(c, has));
+  }
+}
 
 export default class FullBacklinksPlugin extends Plugin {
   private views = new WeakMap<MarkdownView, ViewState>();
@@ -200,7 +275,7 @@ export default class FullBacklinksPlugin extends Plugin {
       const host = this.getHost(view);
       lines.push(`Active note (${view.getMode()}): host ${host ? "found <" + host.className.split(" ")[0] + ">" : "NOT found, using fallback"}`);
       const vs = this.views.get(view);
-      lines.push(vs ? `Panes: ${vs.panes.length}, attached: ${vs.el.isConnected}` : "No panes created for this note yet");
+      lines.push(vs ? `Panes: ${vs.panes.length} + All backlinks, attached: ${vs.el.isConnected}` : "No panes created for this note yet");
     } else lines.push("No active note.");
     return lines;
   }
@@ -210,6 +285,7 @@ export default class FullBacklinksPlugin extends Plugin {
     if (!vs) return;
     vs.observer?.disconnect();
     for (const p of vs.panes) p.component.unload();
+    vs.base?.component.unload();
     vs.el.remove();
     this.views.delete(view);
     this.allViews.delete(vs);
@@ -280,7 +356,7 @@ export default class FullBacklinksPlugin extends Plugin {
     this.wireLinks(el);
     const addBtn = el.createEl("button", { cls: "bfv-add", text: "+ Add backlinks pane" });
     const vs: ViewState = {
-      el, addBtn, panes: [], notePath: null, savedJson: "", dirty: false, graceUntil: 0,
+      el, addBtn, panes: [], base: null, notePath: null, savedJson: "", dirty: false, graceUntil: 0,
       observer: null, reattachCount: 0, reattachSince: 0,
       save: debounce(() => void this.writeConfig(vs), 600, true),
     };
@@ -310,10 +386,6 @@ export default class FullBacklinksPlugin extends Plugin {
     st.component.unload();
     st.el.remove();
     vs.panes.splice(i, 1);
-    if (!vs.panes.length) {
-      // always keep one pane; it falls back to defaults
-      vs.panes.push(this.createPanel(vs, defaults()));
-    }
     this.updateTitles(vs);
     vs.dirty = true;
     vs.save();
@@ -335,6 +407,7 @@ export default class FullBacklinksPlugin extends Plugin {
     if (vs && vs.el.parentElement !== host) {
       host.appendChild(vs.el);
       vs.panes.forEach((p) => (p.signature = ""));
+      if (vs.base) vs.base.signature = "";
       this.watchHost(vs, host);
     }
     if (!vs) {
@@ -344,11 +417,15 @@ export default class FullBacklinksPlugin extends Plugin {
       this.watchHost(vs, host);
     }
 
+    const switched = vs.notePath !== file.path;
     this.loadConfig(vs, file);
+    if (switched || !vs.base) this.resetBase(vs);
     vs.el.appendChild(vs.addBtn);
+    if (vs.el.firstChild !== vs.base!.el) vs.el.prepend(vs.base!.el); // always the first pane
 
     const sources = this.getBacklinkSources(file);
     for (const pane of vs.panes) this.refreshPane(pane, file, sources);
+    this.refreshPane(vs.base!, file, sources);
   }
 
   private updatePane(st: PanelState) {
@@ -359,6 +436,7 @@ export default class FullBacklinksPlugin extends Plugin {
   }
 
   private refreshPane(st: PanelState, file: TFile, backlinks: TFile[]) {
+    if (st.deferred) { st.countEl.setText(String(backlinks.length)); return; }
     const q = st.config.query.trim();
     const id = ++st.reqId;
     if (!q) {
@@ -434,13 +512,12 @@ export default class FullBacklinksPlugin extends Plugin {
     for (const p of gone) st.opened.delete(p);
     st.openOrder = st.openOrder.filter((p) => st.items.has(p));
     st.config.open = keep;
-    st.view.dirty = true;
-    st.view.save();
+    this.persist(st);
   }
 
   // ---------- panel skeleton ----------
 
-  private createPanel(vs: ViewState, config: Settings): PanelState {
+  private createPanel(vs: ViewState, config: Settings, ephemeral = false): PanelState {
     const el = vs.el.createDiv({ cls: PANEL_CLASS });
     vs.el.appendChild(vs.addBtn);
     const component = new Component();
@@ -459,8 +536,12 @@ export default class FullBacklinksPlugin extends Plugin {
     const sortBtn = bar.createEl("button", { cls: "bfv-tool-btn" });
     const filterBtn = bar.createEl("button", { cls: "bfv-tool-btn" });
     const searchInput = bar.createEl("input", {
-      cls: "bfv-filter", type: "text", placeholder: "Search backlinks…",
+      cls: "bfv-filter", type: "text", placeholder: "Search… (a b, a OR b, NOT a, \"a phrase\", ( ))",
+      attr: { title: "Adjacent words must all match. Use OR, NOT (or -word), \"quoted phrases\" and parentheses; operators in capitals." },
     });
+    const ftLabel = bar.createEl("label", { cls: "bfv-fulltext", attr: { title: "Also search the text of every note in this pane" } });
+    const ftBox = ftLabel.createEl("input", { type: "checkbox" });
+    ftLabel.appendText("Full text");
     const titleInput = body.createEl("input", {
       cls: "bfv-query bfv-title-input", type: "text", placeholder: "Pane title (optional)",
     });
@@ -477,8 +558,9 @@ export default class FullBacklinksPlugin extends Plugin {
 
     const st: PanelState = {
       el, listEl, countEl, filterBtn, sortBtn, filterPanel, sortPanel, component,
-      signature: "", collapsed: false, opened: new Set(config.open), openOrder: [...config.open].reverse(), items: new Map(),
+      signature: "", collapsed: ephemeral, ephemeral, deferred: ephemeral, opened: new Set(config.open), openOrder: [...config.open].reverse(), items: new Map(),
       propDefs: [...FILE_PROPS], types: new Map(), search: "", emptyEl,
+      fullText: false, searchId: 0, itemsVersion: 0, sortedKey: "",
       titleEl, queryInput, titleInput, reqId: 0, error: "", config, view: vs,
       renderEditors: () => {
         if (!filterPanel.hasClass("bfv-hidden")) this.renderFilterEditor(st);
@@ -498,8 +580,18 @@ export default class FullBacklinksPlugin extends Plugin {
       el.toggleClass("is-collapsed", st.collapsed);
       chev.setText(st.collapsed ? "▸" : "▾");
     };
-    header.addEventListener("click", () => { st.collapsed = !st.collapsed; applyCollapse(); });
+    header.addEventListener("click", () => {
+      st.collapsed = !st.collapsed;
+      applyCollapse();
+      if (!st.collapsed && st.deferred) { st.deferred = false; this.updatePane(st); }
+    });
     applyCollapse();
+    if (ephemeral) {
+      el.addClass("bfv-base");
+      rmBtn.remove();
+      titleInput.remove();
+      queryInput.remove();
+    }
 
     filterBtn.addEventListener("click", () => {
       filterPanel.toggleClass("bfv-hidden", !filterPanel.hasClass("bfv-hidden"));
@@ -511,19 +603,18 @@ export default class FullBacklinksPlugin extends Plugin {
     });
     const onSearch = debounce(() => { st.search = searchInput.value; this.applyView(st); }, 150, true);
     searchInput.addEventListener("input", onSearch);
+    ftBox.addEventListener("change", () => { st.fullText = ftBox.checked; this.applyView(st); });
 
     const onQuery = debounce(() => {
       st.config.query = queryInput.value.trim();
-      st.view.dirty = true;
-      st.view.save();
+      this.persist(st);
       this.updateTitles(st.view);
       this.updatePane(st);
     }, 600, true);
     queryInput.addEventListener("input", onQuery);
     const onTitle = debounce(() => {
       st.config.title = titleInput.value.trim();
-      st.view.dirty = true;
-      st.view.save();
+      this.persist(st);
       this.updateTitles(st.view);
     }, 400, true);
     titleInput.addEventListener("input", onTitle);
@@ -534,10 +625,23 @@ export default class FullBacklinksPlugin extends Plugin {
 
   // ---------- config editing UI ----------
 
-  /** Called after any filter/sort edit. structural=true re-renders editors (including the source). */
-  private configChanged(st: PanelState, structural: boolean) {
+  /** Mark a pane's settings as changed and schedule a frontmatter write (never for the built-in pane). */
+  private persist(st: PanelState) {
+    if (st.ephemeral) return;
     st.view.dirty = true;
     st.view.save();
+  }
+
+  /** (Re)creates the built-in "All backlinks" pane (shown first): collapsed, unsaved, built on first expand. */
+  private resetBase(vs: ViewState) {
+    if (vs.base) { vs.base.component.unload(); vs.base.el.remove(); }
+    vs.base = this.createPanel(vs, defaults(), true);
+    vs.base.titleEl.setText("All backlinks");
+  }
+
+  /** Called after any filter/sort edit. structural=true re-renders editors (including the source). */
+  private configChanged(st: PanelState, structural: boolean) {
+    this.persist(st);
     st.updateButtons();
     if (structural) st.renderEditors();
     this.applyView(st);
@@ -558,7 +662,7 @@ export default class FullBacklinksPlugin extends Plugin {
     const out = arr.map((e: any) =>
       this.parseConfig({ title: e?.title, filter: this.jsonish(e?.filter), sort: this.jsonish(e?.sort), query: e?.query, open: this.jsonish(e?.open) })
     );
-    return out.length ? out : [defaults()];
+    return out;
   }
 
   private loadConfig(vs: ViewState, file: TFile) {
@@ -651,7 +755,7 @@ export default class FullBacklinksPlugin extends Plugin {
       query: p.config.query,
       open: p.config.open,
     })));
-    const allDefault = list.length === 1 && JSON.stringify(list[0]) === JSON.stringify(def);
+    const allDefault = list.length === 0;
     vs.savedJson = JSON.stringify(list);
     vs.dirty = false;
     vs.graceUntil = Date.now() + 1500;
@@ -734,8 +838,7 @@ export default class FullBacklinksPlugin extends Plugin {
     if (!OPS[type].includes(rule.op)) {
       // operator invalid for this property type: fix it and write the fix back so UI == frontmatter
       rule.op = OPS[type][0];
-      st.view.dirty = true;
-      st.view.save();
+      this.persist(st);
     }
 
     this.propSelect(row, st, rule.prop, (v) => {
@@ -822,17 +925,20 @@ export default class FullBacklinksPlugin extends Plugin {
 
       const old = st.items.get(src.path);
       if (old && old.sig === sig) {
-        Object.assign(old, { file: src, props, lists, tags });
+        if (old.file.path !== src.path) st.itemsVersion++;
+        Object.assign(old, { file: src, props, lists, tags, hay: undefined });
         continue;
       }
       if (old) { st.component.removeChild(old.comp); old.el.remove(); }
       st.items.set(src.path, this.createItem(st, src, sig, props, lists, tags));
+      st.itemsVersion++;
     }
     for (const [path, it] of st.items) {
       if (!seen.has(path)) {
         st.component.removeChild(it.comp);
         it.el.remove();
         st.items.delete(path);
+        st.itemsVersion++;
       }
     }
 
@@ -948,13 +1054,22 @@ export default class FullBacklinksPlugin extends Plugin {
     return !res.some(Boolean);
   }
 
-  private matchesSearch(it: ItemState, q: string): boolean {
-    if (!q) return true;
-    const hay = [
+  /** Lower-cased path, tags and properties of a note: what a normal (not full-text) search looks in. */
+  private hayOf(it: ItemState): string {
+    return [
       it.file.path, ...it.tags,
       ...Object.entries(it.props).flatMap(([k, vs]) => [k, ...vs]),
     ].join("\n").toLowerCase();
-    return q.toLowerCase().split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
+  }
+
+  /** Reads (and caches, lower-cased) the text of notes for full-text search, 100 at a time. */
+  private async loadBodies(items: ItemState[]) {
+    for (let i = 0; i < items.length; i += 100) {
+      await Promise.all(items.slice(i, i + 100).map(async (it) => {
+        if (it.body !== undefined) return;
+        try { it.body = (await this.app.vault.cachedRead(it.file)).toLowerCase(); } catch { it.body = ""; }
+      }));
+    }
   }
 
   private compareItems(st: PanelState, a: ItemState, b: ItemState): number {
@@ -975,20 +1090,52 @@ export default class FullBacklinksPlugin extends Plugin {
     return a.file.path.localeCompare(b.file.path);
   }
 
+  /**
+   * Sort, search and filter a pane. The DOM is only reordered when the sort or the set of notes changes;
+   * a search or filter change just toggles visibility on the cards whose visibility actually changed.
+   */
   private applyView(st: PanelState) {
     const all = [...st.items.values()];
-    const visible = all
-      .filter((it) => this.matchesSearch(it, st.search.trim()) && this.evalNode(st, it, st.config.filter))
-      .sort((a, b) => this.compareItems(st, a, b));
-    const vis = new Set(visible);
+    const sortKey = JSON.stringify(st.config.sorts) + "|" + st.itemsVersion;
+    if (sortKey !== st.sortedKey) {
+      all.sort((a, b) => this.compareItems(st, a, b));
+      const frag = document.createDocumentFragment();
+      for (const it of all) frag.appendChild(it.el);
+      st.listEl.appendChild(frag);
+      st.sortedKey = sortKey;
+    }
+    const q = st.search.trim();
+    const tree = q ? parseSearch(q) : null;
+    const id = ++st.searchId;
+    if (tree && st.fullText) {
+      const missing = all.filter((it) => it.body === undefined);
+      if (missing.length) {
+        st.countEl.setText(`Reading ${missing.length} notes…`);
+        void this.loadBodies(missing).then(() => { if (id === st.searchId) this.showMatches(st, all, tree, q); });
+        return; // keep the current view until the text is loaded
+      }
+    }
+    this.showMatches(st, all, tree, q);
+  }
 
-    for (const it of all) it.el.toggleClass("bfv-hidden", !vis.has(it));
-    for (const it of visible) st.listEl.appendChild(it.el);
-
-    const filtered = st.search.trim() !== "" || this.countRules(st.config.filter) > 0;
-    st.countEl.setText(filtered ? `${visible.length} / ${all.length}` : String(all.length));
+  private showMatches(st: PanelState, all: ItemState[], tree: SearchNode | null, q: string) {
+    let shown = 0;
+    for (const it of all) {
+      let ok = true;
+      if (tree) {
+        if (it.hay === undefined) it.hay = this.hayOf(it);
+        const hay = it.hay;
+        const body = st.fullText ? it.body ?? "" : "";
+        ok = evalSearch(tree, (t) => hay.includes(t) || (body !== "" && body.includes(t)));
+      }
+      if (ok) ok = this.evalNode(st, it, st.config.filter);
+      if (ok) shown++;
+      if (it.el.hasClass("bfv-hidden") === ok) it.el.toggleClass("bfv-hidden", !ok);
+    }
+    const filtered = q !== "" || this.countRules(st.config.filter) > 0;
+    st.countEl.setText(filtered ? `${shown} / ${all.length}` : String(all.length));
     st.emptyEl.setText(
-      st.error ? st.error : all.length === 0 ? (st.config.query ? "No notes." : "No backlinks found.") : visible.length === 0 ? "No notes match the filters." : ""
+      st.error ? st.error : all.length === 0 ? (st.config.query ? "No notes." : "No backlinks found.") : shown === 0 ? "No notes match the filters." : ""
     );
   }
 
@@ -1010,8 +1157,7 @@ export default class FullBacklinksPlugin extends Plugin {
     // drop remembered cards that are no longer in this pane (only once the pane has loaded its notes)
     if (st.items.size && !st.error) st.openOrder = st.openOrder.filter((p) => st.items.has(p));
     st.config.open = st.openOrder.slice(-MAX_OPEN_SAVED).reverse();
-    st.view.dirty = true;
-    st.view.save();
+    this.persist(st);
   }
 
   /** Frontmatter changed from outside: expand exactly the cards it lists. */
@@ -1094,6 +1240,7 @@ export default class FullBacklinksPlugin extends Plugin {
         rendered = true;
         try {
           const text = await this.app.vault.cachedRead(src);
+          this.renderProperties(content, src);
           await MarkdownRenderer.render(this.app, text, content, src.path, comp);
         } catch (e) {
           console.error("[backlinks-full-view] failed to render", src.path, e);
@@ -1111,6 +1258,56 @@ export default class FullBacklinksPlugin extends Plugin {
     void setOpen(opened.has(src.path));
 
     return { el: item, comp, setOpen };
+  }
+
+  /**
+   * A compact, read-only properties table at the top of a card (MarkdownRenderer drops frontmatter).
+   * Wiki links become internal links, so the panel's click/hover handling applies to them. `backlinks`
+   * is pane config, not content, so it's left out.
+   */
+  private renderProperties(el: HTMLElement, src: TFile) {
+    const fm = this.app.metadataCache.getFileCache(src)?.frontmatter as Record<string, unknown> | undefined;
+    const keys = Object.keys(fm ?? {}).filter((k) => k !== "backlinks" && k !== "position");
+    if (!fm || !keys.length) return;
+    const table = el.createDiv({ cls: "bfv-props" });
+    const LINK = /^\[\[([^\]|#]+)(#[^\]|]*)?(?:\|([^\]]*))?\]\]$/;
+    const value = (cell: HTMLElement, v: unknown, key: string) => {
+      if (v === null || v === undefined || v === "") return;
+      if (typeof v === "string") {
+        const m = v.match(LINK);
+        if (m) {
+          const target = m[1] + (m[2] ?? "");
+          const dest = this.app.metadataCache.getFirstLinkpathDest(m[1], src.path);
+          cell.createEl("a", {
+            cls: "internal-link" + (dest ? "" : " is-unresolved"),
+            text: m[3] ?? (dest?.basename ?? m[1].split("/").pop() ?? m[1]) + (m[2] ?? ""),
+            href: target, attr: { "data-href": target },
+          });
+        } else if (key === "tags" || key === "tag") {
+          cell.createSpan({ cls: "tag", text: "#" + v.replace(/^#/, "") });
+        } else {
+          cell.createSpan({ text: v });
+        }
+      } else if (typeof v === "object") {
+        cell.createSpan({ text: JSON.stringify(v) });
+      } else {
+        cell.createSpan({ text: String(v) });
+      }
+    };
+    for (const k of keys) {
+      const row = table.createDiv({ cls: "bfv-prop" });
+      row.createDiv({ cls: "bfv-prop-key", text: k });
+      const cell = row.createDiv({ cls: "bfv-prop-value" });
+      const v = fm[k];
+      if (Array.isArray(v)) {
+        for (const x of v) {
+          const chip = cell.createSpan({ cls: "bfv-prop-chip" });
+          value(chip, x, k);
+        }
+      } else {
+        value(cell, v, k);
+      }
+    }
   }
 
   // ---------- public API (for DataviewJS) ----------

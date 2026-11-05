@@ -67,3 +67,26 @@
 .bfv-remove { margin-left: auto; }
 .bfv-query { width: 100%; margin: 4px 0; }
 .bfv-embeds { margin: 0.5em 0; }
+
+/* properties table at the top of an expanded card */
+.bfv-props {
+  display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px;
+  margin: 4px 0 8px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--background-modifier-border, #ddd);
+  font-size: var(--font-ui-small, 0.9em);
+}
+.bfv-prop { display: contents; }
+.bfv-prop-key { color: var(--text-muted, #888); }
+.bfv-prop-value { min-width: 0; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: 4px; }
+.bfv-prop-chip {
+  padding: 0 6px; border-radius: var(--radius-s, 4px);
+  background: var(--background-modifier-hover, rgba(0,0,0,.05));
+}
+
+.bfv-fulltext {
+  display: flex; align-items: center; gap: 4px; white-space: nowrap;
+  color: var(--text-muted, #888); font-size: var(--font-ui-small, 0.9em); cursor: pointer;
+}
+
+/* built-in "All backlinks" pane (always present, starts collapsed, never saved) */
+.bfv-base .bfv-title { color: var(--text-muted, #888); }
