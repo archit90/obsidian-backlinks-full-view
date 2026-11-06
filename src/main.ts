@@ -40,6 +40,7 @@ import {
   OPEN_SAVE_DELAY,
   PANEL_CLASS,
   REFRESH_DELAY,
+  SKIP_SELECTOR,
 } from "./constants";
 import { notePathsInResult } from "./dataview";
 import { SearchNode, evalSearch, parseSearch } from "./search";
@@ -234,6 +235,12 @@ export default class FullBacklinksPlugin extends Plugin {
       if (!(view instanceof MarkdownView)) return;
       this.observeView(view);
       const vs = this.views.get(view);
+      // Opted out by its host: Editor Lanes sets data-bfv-skip on a lanes tab when "Show backlinks panes under lane
+      // notes" is off. Drop any panes already built there (re-built on the next layout-change once it's gone).
+      if (view.containerEl.closest(SKIP_SELECTOR)) {
+        if (vs) this.destroyView(view);
+        return;
+      }
       if (!view.file) {
         if (vs) this.destroyView(view);
         return;

@@ -39,6 +39,7 @@ var CONFIG_SAVE_DELAY = 600;
 var OPEN_SAVE_DELAY = 5e3;
 var REFRESH_DELAY = 300;
 var CARD_RERENDER_DELAY = 500;
+var SKIP_SELECTOR = "[data-bfv-skip]";
 
 // src/values.ts
 function toStrings(v) {
@@ -592,6 +593,10 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       if (!(view instanceof import_obsidian.MarkdownView)) return;
       this.observeView(view);
       const vs = this.views.get(view);
+      if (view.containerEl.closest(SKIP_SELECTOR)) {
+        if (vs) this.destroyView(view);
+        return;
+      }
       if (!view.file) {
         if (vs) this.destroyView(view);
         return;
