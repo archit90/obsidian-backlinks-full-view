@@ -1,3 +1,7 @@
+/*
+GENERATED FILE, built by esbuild from src/. Edit the TypeScript sources, not this file.
+*/
+
 "use strict";
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -17,58 +21,33 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// main.ts
+// src/main.ts
 var main_exports = {};
 __export(main_exports, {
   default: () => FullBacklinksPlugin
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
+
+// src/constants.ts
 var PANEL_CLASS = "bfv-panel";
 var HOVER_SOURCE = "backlinks-full-view";
 var DEFAULT_EMBED_LIMIT = 25;
 var MAX_EMBED_DEPTH = 3;
 var MAX_OPEN_SAVED = 50;
-var defaults = () => ({
-  title: "",
-  // pane heading; falls back to "Backlinks" or "Query"
-  filter: { type: "group", mode: "and", children: [] },
-  sorts: [{ prop: "file.name", dir: "asc" }],
-  query: "",
-  // optional Dataview query that supplies the notes instead of backlinks
-  open: []
-  // paths of expanded cards, most recent first (at most MAX_OPEN_SAVED)
-});
-var FILE_PROPS = [
-  { id: "file.name", label: "name", type: "text", group: "file" },
-  { id: "file.path", label: "path", type: "text", group: "file" },
-  { id: "file.folder", label: "folder", type: "text", group: "file" },
-  { id: "file.ext", label: "extension", type: "text", group: "file" },
-  { id: "file.ctime", label: "created time", type: "date", group: "file" },
-  { id: "file.mtime", label: "modified time", type: "date", group: "file" },
-  { id: "file.size", label: "size", type: "number", group: "file" },
-  { id: "file.tags", label: "tags", type: "list", group: "file" }
-];
-var OPS = {
-  text: ["is", "is not", "contains", "does not contain", "starts with", "ends with", "is empty", "is not empty"],
-  number: ["=", "\u2260", "<", "\u2264", ">", "\u2265", "is empty", "is not empty"],
-  date: ["is", "is not", "before", "after", "on or before", "on or after", "is empty", "is not empty"],
-  boolean: ["is true", "is false", "is empty", "is not empty"],
-  list: ["contains", "does not contain", "is empty", "is not empty"]
-};
-var NO_VALUE = /* @__PURE__ */ new Set(["is empty", "is not empty", "is true", "is false"]);
-function dirLabels(t) {
-  if (t === "number") return ["1 \u2192 9", "9 \u2192 1"];
-  if (t === "date") return ["Old \u2192 New", "New \u2192 Old"];
-  if (t === "boolean") return ["False \u2192 True", "True \u2192 False"];
-  return ["A \u2192 Z", "Z \u2192 A"];
-}
+var CONFIG_SAVE_DELAY = 600;
+var OPEN_SAVE_DELAY = 5e3;
+var REFRESH_DELAY = 300;
+var CARD_RERENDER_DELAY = 500;
+
+// src/values.ts
 function toStrings(v) {
   if (v === null || v === void 0) return [];
   if (Array.isArray(v)) return v.flatMap(toStrings);
   if (typeof v === "object") return [JSON.stringify(v)];
   return [String(v)];
 }
+var isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 var pad = (n) => String(n).padStart(2, "0");
 var localIso = (ms) => {
   const d = new Date(ms);
@@ -87,18 +66,228 @@ function normDate(s) {
   return t.slice(0, 10);
 }
 var DATE_RE = /^\d{4}-\d{2}-\d{2}/;
+
+// src/config.ts
+var defaults = () => ({
+  title: "",
+  // pane heading; falls back to "Backlinks" or "Query"
+  filter: { type: "group", mode: "and", children: [] },
+  sorts: [{ prop: "file.name", dir: "asc" }],
+  query: "",
+  // optional Dataview query that supplies the notes instead of backlinks
+  open: []
+  // paths of expanded cards, most recent first (at most MAX_OPEN_SAVED)
+});
+var clone = (v) => JSON.parse(JSON.stringify(v));
+var KEYS = [
+  ["title", "title"],
+  ["filter", "filter"],
+  ["sort", "sorts"],
+  ["query", "query"],
+  ["open", "open"]
+];
+var FILE_PROPS = [
+  { id: "file.name", label: "name", type: "text", group: "file" },
+  { id: "file.path", label: "path", type: "text", group: "file" },
+  { id: "file.folder", label: "folder", type: "text", group: "file" },
+  { id: "file.ext", label: "extension", type: "text", group: "file" },
+  { id: "file.ctime", label: "created time", type: "date", group: "file" },
+  { id: "file.mtime", label: "modified time", type: "date", group: "file" },
+  { id: "file.size", label: "size", type: "number", group: "file" },
+  { id: "file.tags", label: "tags", type: "list", group: "file" }
+];
+var OPS = {
+  text: ["is", "is not", "contains", "does not contain", "starts with", "ends with", "is empty", "is not empty"],
+  number: ["=", "\u2260", "<", "\u2264", ">", "\u2265", "is empty", "is not empty"],
+  date: ["is", "is not", "before", "after", "on or before", "on or after", "is empty", "is not empty"],
+  boolean: ["is true", "is false", "is empty", "is not empty"],
+  list: ["contains", "does not contain", "is empty", "is not empty"]
+};
+var NO_VALUE = /* @__PURE__ */ new Set(["is empty", "is not empty", "is true", "is false"]);
+var OP_TYPE_ORDER = ["number", "text", "date", "list", "boolean"];
+function dirLabels(t) {
+  if (t === "number") return ["1 \u2192 9", "9 \u2192 1"];
+  if (t === "date") return ["Old \u2192 New", "New \u2192 Old"];
+  if (t === "boolean") return ["False \u2192 True", "True \u2192 False"];
+  return ["A \u2192 Z", "Z \u2192 A"];
+}
+function parseList(raw) {
+  if (raw === null || raw === void 0) return { entries: [], error: "" };
+  const arr = Array.isArray(raw) ? raw : isPlainObject(raw) ? [raw] : null;
+  if (!arr) return { entries: [], error: "The `backlinks` property isn't a list of panes" };
+  return { entries: arr.map((e, i) => ({ ...parseEntry(e), src: i })), error: "" };
+}
+function jsonField(v, name, errors) {
+  if (v === null || v === void 0 || v === "") return void 0;
+  if (typeof v !== "string") return v;
+  try {
+    return JSON.parse(v);
+  } catch {
+    errors.push(`\`${name}\` isn't valid JSON`);
+    return void 0;
+  }
+}
+function parseEntry(e) {
+  const cfg = defaults();
+  const errors = [];
+  if (e === null || e === void 0) return { cfg, raw: null, errors };
+  if (!isPlainObject(e))
+    return { cfg, raw: null, errors: ["the entry isn't a set of pane keys (title, filter, sort, query, open)"] };
+  const r = e;
+  if (typeof r.title === "string" || typeof r.title === "number") cfg.title = String(r.title).trim();
+  else if (r.title != null) errors.push("`title` isn't text");
+  const fv = jsonField(r.filter, "filter", errors);
+  if (fv !== void 0) {
+    const g = sanitizeGroup(fv);
+    if (g) cfg.filter = g;
+    else errors.push("`filter` isn't a filter group");
+  }
+  const sv = jsonField(r.sort, "sort", errors);
+  if (sv !== void 0) {
+    if (Array.isArray(sv) && sv.every((x) => x && typeof x.prop === "string")) {
+      cfg.sorts = sv.map((x) => ({ prop: x.prop, dir: x.dir === "desc" ? "desc" : "asc" }));
+    } else errors.push("`sort` isn't a list of sort rules");
+  }
+  if (typeof r.query === "string") cfg.query = r.query.trim();
+  else if (r.query != null) errors.push("`query` isn't text");
+  const ov = jsonField(r.open, "open", errors);
+  if (ov !== void 0) {
+    if (Array.isArray(ov)) {
+      cfg.open = [...new Set(ov.filter((x) => typeof x === "string" && x !== ""))].slice(
+        0,
+        MAX_OPEN_SAVED
+      );
+    } else errors.push("`open` isn't a list of paths");
+  }
+  return { cfg, raw: r, errors };
+}
+function sanitizeGroup(x) {
+  if (!x || typeof x !== "object" || !Array.isArray(x.children)) return null;
+  if (x.mode !== void 0 && x.mode !== "and" && x.mode !== "or" && x.mode !== "not") return null;
+  const children = [];
+  for (const c of x.children) {
+    if (Array.isArray(c?.children)) {
+      const g = sanitizeGroup(c);
+      if (!g) return null;
+      children.push(g);
+    } else if (typeof c?.prop === "string" && typeof c?.op === "string") {
+      children.push({ type: "rule", prop: c.prop, op: c.op, value: String(c.value ?? "") });
+    } else return null;
+  }
+  return { type: "group", mode: x.mode ?? "and", children };
+}
+function listJson(entries) {
+  return JSON.stringify(entries.map((e) => [e.cfg, e.errors]));
+}
+function merge(base, ours, disk) {
+  const fromDisk = (o) => {
+    const d = o.src !== null ? disk[o.src] : void 0;
+    return { ...o, raw: d ? d.raw : o.raw };
+  };
+  if (listJson(disk) === listJson(base)) return ours.map(fromDisk);
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const oursStructural = ours.length !== base.length || ours.some((o, i) => o.src !== i);
+  if (!oursStructural) {
+    return disk.map((d, i) => {
+      const o = ours[i], b = base[i];
+      if (!o || !b) return d;
+      const cfg = clone(d.cfg);
+      for (const [, f] of KEYS) if (!same(o.cfg[f], b.cfg[f])) cfg[f] = clone(o.cfg[f]);
+      return { cfg, raw: d.raw, errors: [], src: i };
+    });
+  }
+  if (disk.length === base.length) return ours.map(fromDisk);
+  console.warn("[backlinks-full-view] panes were added or removed both here and in the file; keeping this view's list");
+  return ours.map((o) => ({ ...o, src: null }));
+}
+function serializeEntry(e) {
+  const def = defaults();
+  const c = e.cfg;
+  const vals = {
+    title: c.title || null,
+    filter: JSON.stringify(c.filter) === JSON.stringify(def.filter) ? null : JSON.stringify(c.filter),
+    sort: JSON.stringify(c.sorts) === JSON.stringify(def.sorts) ? null : JSON.stringify(c.sorts),
+    query: c.query || null,
+    open: c.open.length ? [...c.open] : null
+  };
+  if (!e.raw) return vals;
+  const was = parseEntry(e.raw).cfg;
+  const out = { ...e.raw };
+  for (const [k, f] of KEYS) {
+    if (k in e.raw && JSON.stringify(was[f]) === JSON.stringify(c[f])) continue;
+    if (vals[k] === null && !(k in e.raw)) continue;
+    out[k] = vals[k];
+  }
+  return out;
+}
+
+// src/dataview.ts
+function notePathsInResult(val) {
+  const paths = /* @__PURE__ */ new Set();
+  const walk = (v, depth) => {
+    if (v == null || depth > 5 || typeof v !== "object") return;
+    if (typeof v.path === "string") {
+      paths.add(v.path);
+      return;
+    }
+    if (typeof v.file?.path === "string") {
+      paths.add(v.file.path);
+      return;
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) walk(x, depth + 1);
+      return;
+    }
+    if (Array.isArray(v.values)) {
+      for (const x of v.values) walk(x, depth + 1);
+      return;
+    }
+    if (Object.getPrototypeOf(v) === Object.prototype) for (const x of Object.values(v)) walk(x, depth + 1);
+  };
+  const values = Array.isArray(val?.values) ? val.values : [];
+  switch (val?.type) {
+    case "table": {
+      const grouped = val.idMeaning?.type === "group";
+      for (const row of values) walk(grouped ? row : Array.isArray(row) ? row[0] : row, 0);
+      break;
+    }
+    case "list": {
+      const grouped = val.primaryMeaning?.type === "group";
+      for (const x of values) {
+        if (x?.$widget === "dataview:list-pair") {
+          walk(x.key, 0);
+          if (grouped) walk(x.value, 0);
+        } else walk(x, 0);
+      }
+      break;
+    }
+    case "calendar":
+      for (const x of values) walk(x?.link, 0);
+      break;
+    default:
+      walk(val?.values ?? val, 0);
+  }
+  return paths;
+}
+
+// src/search.ts
 function parseSearch(q) {
   const toks = [];
-  const re = /\s*(?:(\()|(\))|"([^"]*)"?|(-?)([^\s()"]+))/y;
+  const re = /\s*(?:(-?)(\()|(\))|(-?)"([^"]*)"?|(-?)([^\s()"]+))/y;
   let m;
   while (re.lastIndex < q.length && (m = re.exec(q))) {
-    if (m[1]) toks.push("(");
-    else if (m[2]) toks.push(")");
-    else if (m[3] !== void 0) {
-      if (m[3].trim()) toks.push("t:" + m[3].toLowerCase());
-    } else if (m[5]) {
-      if (m[4]) toks.push("NOT");
-      toks.push(["AND", "OR", "NOT"].includes(m[5]) && !m[4] ? m[5] : "t:" + m[5].toLowerCase());
+    if (m[2]) {
+      if (m[1]) toks.push("NOT");
+      toks.push("(");
+    } else if (m[3]) toks.push(")");
+    else if (m[5] !== void 0) {
+      if (m[5].trim()) {
+        if (m[4]) toks.push("NOT");
+        toks.push("t:" + m[5].toLowerCase());
+      }
+    } else if (m[7]) {
+      if (m[6]) toks.push("NOT");
+      toks.push(["AND", "OR", "NOT"].includes(m[7]) && !m[6] ? m[7] : "t:" + m[7].toLowerCase());
     }
   }
   let i = 0;
@@ -168,13 +357,38 @@ function evalSearch(n, has) {
       return n.c.some((c) => evalSearch(c, has));
   }
 }
+
+// src/main.ts
 var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
-    this.views = /* @__PURE__ */ new WeakMap();
+    this.views = /* @__PURE__ */ new Map();
+    this.observed = /* @__PURE__ */ new WeakSet();
+    // views whose close tears down their state
+    this.roViews = /* @__PURE__ */ new WeakMap();
+    this.ro = null;
+    // notices a hidden view being shown again
     this.linksResolvedOnce = false;
     // set by the first "resolved" event after the plugin loads
-    this.allViews = /* @__PURE__ */ new Set();
+    /** Per-path change counter, bumped on every metadata change, rename or delete. Signatures use it. */
+    this.versions = /* @__PURE__ */ new Map();
+    this.dvEpoch = 0;
+    // bumped on every Dataview index event; query results are cached per epoch
+    // what the next refresh has to look at
+    this.pendingAll = false;
+    this.pendingLayout = false;
+    this.pendingPaths = /* @__PURE__ */ new Set();
+    this.pendingViews = /* @__PURE__ */ new Set();
+    this.pendingDv = false;
+    this.queryCache = /* @__PURE__ */ new Map();
+    // per refresh cycle
+    this.bodies = /* @__PURE__ */ new Map();
+    // lower-cased note text for full-text search, shared by panes
+    this.fullTextPanes = /* @__PURE__ */ new Set();
+    // panes whose full-text search holds bodies
+    this.collator = new Intl.Collator(void 0, { numeric: true, sensitivity: "base" });
+    this.schedule = () => {
+    };
     this.warned = /* @__PURE__ */ new Set();
     // ---------- public API (for DataviewJS) ----------
     //
@@ -183,32 +397,31 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     //   (bfv is a global alias of app.plugins.plugins["obsidian-backlinks-full-view"].api)
     this.api = {
       embed: (target, pages, opts = {}) => {
-        var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j;
         const container = target instanceof HTMLElement ? target : target.container;
-        const parentComp = (_a = target == null ? void 0 : target.component) != null ? _a : this;
-        const sourcePath = (_c = (_b = opts.sourcePath) != null ? _b : target == null ? void 0 : target.currentFilePath) != null ? _c : "";
-        const arr = Array.isArray(pages) ? pages : Array.isArray(pages == null ? void 0 : pages.values) ? pages.values : Array.from(pages != null ? pages : []);
+        const parentComp = target?.component ?? this;
+        const sourcePath = opts.sourcePath ?? target?.currentFilePath ?? "";
+        const arr = Array.isArray(pages) ? pages : Array.isArray(pages?.values) ? pages.values : Array.from(pages ?? []);
         const wrap = container.createDiv({ cls: "bfv-embeds" });
         this.wireLinks(wrap);
         const ancestors = /* @__PURE__ */ new Set();
         if (sourcePath) ancestors.add(sourcePath);
         let depth = 0;
-        for (let el = container.closest("[data-bfv-path]"); el; el = (_e = (_d = el.parentElement) == null ? void 0 : _d.closest("[data-bfv-path]")) != null ? _e : null) {
-          ancestors.add((_f = el.getAttribute("data-bfv-path")) != null ? _f : "");
+        for (let el = container.closest("[data-bfv-path]"); el; el = el.parentElement?.closest("[data-bfv-path]") ?? null) {
+          ancestors.add(el.getAttribute("data-bfv-path") ?? "");
           depth++;
         }
         if (depth >= MAX_EMBED_DEPTH) {
           wrap.createDiv({ cls: "bfv-empty", text: "Embed depth limit reached." });
           return wrap;
         }
-        const limit = (_g = opts.limit) != null ? _g : DEFAULT_EMBED_LIMIT;
+        const limit = opts.limit ?? DEFAULT_EMBED_LIMIT;
         let total = 0;
         const opened = /* @__PURE__ */ new Set();
         const seen = /* @__PURE__ */ new Set();
         for (const p of arr) {
-          const path = typeof p === "string" ? p : (_i = (_h = p == null ? void 0 : p.file) == null ? void 0 : _h.path) != null ? _i : p == null ? void 0 : p.path;
+          const path = typeof p === "string" ? p : p?.file?.path ?? p?.path;
           if (!path) continue;
-          const f = (_j = this.app.vault.getAbstractFileByPath(path)) != null ? _j : this.app.metadataCache.getFirstLinkpathDest(path, sourcePath);
+          const f = this.app.vault.getAbstractFileByPath(path) ?? this.app.metadataCache.getFirstLinkpathDest(path, sourcePath);
           if (!(f instanceof import_obsidian.TFile) || f.extension !== "md" || seen.has(f.path) || ancestors.has(f.path)) continue;
           seen.add(f.path);
           total++;
@@ -217,7 +430,10 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
           this.buildCard(wrap, f, parentComp, opened);
         }
         if (total > limit) {
-          wrap.createDiv({ cls: "bfv-empty", text: `Showing ${limit} of ${total} notes. Pass { limit: N } to show more.` });
+          wrap.createDiv({
+            cls: "bfv-empty",
+            text: `Showing ${limit} of ${total} notes. Pass { limit: N } to show more.`
+          });
         }
         if (!total) wrap.createDiv({ cls: "bfv-empty", text: "No notes to embed." });
         return wrap;
@@ -232,120 +448,255 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       name: "Show diagnostics",
       callback: () => new import_obsidian.Notice(this.diagnostics().join("\n"), 12e3)
     });
-    for (const m of this.missingApis()) this.warnOnce("api-" + m, `Obsidian API not available: ${m}. Some features are disabled.`);
-    const refresh = (0, import_obsidian.debounce)(() => this.refreshAll(), 300, true);
-    this.registerEvent(this.app.workspace.on("layout-change", refresh));
-    this.registerEvent(this.app.workspace.on("file-open", refresh));
-    this.registerEvent(this.app.workspace.on("active-leaf-change", refresh));
-    this.registerEvent(this.app.metadataCache.on("resolved", () => {
-      this.linksResolvedOnce = true;
-      refresh();
-    }));
-    this.registerEvent(this.app.metadataCache.on("changed", refresh));
-    this.registerEvent(this.app.vault.on("modify", refresh));
+    for (const m of this.missingApis())
+      this.warnOnce("api-" + m, `Obsidian API not available: ${m}. Some features are disabled.`);
+    this.schedule = (0, import_obsidian.debounce)(() => this.runRefresh(), REFRESH_DELAY, true);
+    this.ro = new ResizeObserver((entries) => {
+      for (const e of entries) {
+        const view = this.roViews.get(e.target);
+        if (!view?.file || !view.containerEl.isShown()) continue;
+        const vs = this.views.get(view);
+        if (!vs || vs.stale) {
+          this.pendingViews.add(view);
+          this.schedule();
+        }
+      }
+    });
+    const layout = () => {
+      this.pendingLayout = true;
+      this.schedule();
+    };
+    const touch = (path) => {
+      this.versions.set(path, (this.versions.get(path) ?? 0) + 1);
+      this.bodies.delete(path);
+      this.pendingPaths.add(path);
+      this.schedule();
+    };
+    this.registerEvent(this.app.workspace.on("layout-change", layout));
+    this.registerEvent(this.app.workspace.on("file-open", layout));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", layout));
+    this.registerEvent(this.app.metadataCache.on("changed", (file) => touch(file.path)));
+    this.registerEvent(
+      this.app.metadataCache.on("resolved", () => {
+        if (!this.linksResolvedOnce) {
+          this.linksResolvedOnce = true;
+          this.pendingAll = true;
+        }
+        this.schedule();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        if (!(file instanceof import_obsidian.TFile)) return;
+        for (const vs of this.views.values()) if (vs.notePath === oldPath) vs.notePath = file.path;
+        touch(oldPath);
+        touch(file.path);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", (file) => {
+        if (file instanceof import_obsidian.TFile) touch(file.path);
+      })
+    );
     try {
       const mc = this.app.metadataCache;
-      this.registerEvent(mc.on("dataview:index-ready", refresh));
-      this.registerEvent(mc.on("dataview:metadata-change", refresh));
+      const dvChanged = () => {
+        this.dvEpoch++;
+        this.pendingDv = true;
+        this.schedule();
+      };
+      this.registerEvent(mc.on("dataview:index-ready", dvChanged));
+      this.registerEvent(mc.on("dataview:metadata-change", dvChanged));
     } catch (e) {
       this.warnOnce("dv-events", "Could not subscribe to Dataview events; query panes refresh on note changes only.");
     }
-    this.app.workspace.onLayoutReady(() => this.refreshAll());
+    this.app.workspace.onLayoutReady(() => {
+      this.pendingAll = true;
+      this.runRefresh();
+    });
   }
   onunload() {
     if (window.bfv === this.api) delete window.bfv;
-    this.app.workspace.iterateAllLeaves((leaf) => {
-      if (leaf.view instanceof import_obsidian.MarkdownView) this.destroyView(leaf.view);
-    });
+    this.ro?.disconnect();
+    for (const view of [...this.views.keys()]) this.destroyView(view);
+    this.bodies.clear();
   }
   missingApis() {
-    var _a, _b;
     const out = [];
-    if (typeof ((_a = this.app.fileManager) == null ? void 0 : _a.processFrontMatter) !== "function") out.push("FileManager.processFrontMatter (saving pane settings)");
-    if (typeof ((_b = import_obsidian.MarkdownRenderer) == null ? void 0 : _b.render) !== "function") out.push("MarkdownRenderer.render (note rendering)");
+    if (typeof this.app.fileManager?.processFrontMatter !== "function")
+      out.push("FileManager.processFrontMatter (saving pane settings)");
+    if (typeof import_obsidian.MarkdownRenderer?.render !== "function") out.push("MarkdownRenderer.render (note rendering)");
     return out;
   }
   diagnostics() {
-    var _a, _b, _c, _d, _e;
     const lines = ["Backlinks Full View diagnostics"];
-    const dv = (_b = (_a = this.app.plugins) == null ? void 0 : _a.plugins) == null ? void 0 : _b.dataview;
-    lines.push(`Dataview: ${dv ? "v" + ((_d = (_c = dv.manifest) == null ? void 0 : _c.version) != null ? _d : "?") + (typeof ((_e = dv.api) == null ? void 0 : _e.query) === "function" ? ", query API ok" : ", query API MISSING") : "not enabled"}`);
+    const dv = this.app.plugins?.plugins?.dataview;
+    lines.push(
+      `Dataview: ${dv ? "v" + (dv.manifest?.version ?? "?") + (typeof dv.api?.query === "function" ? ", query API ok" : ", query API MISSING") : "not enabled"}`
+    );
     const missing = this.missingApis();
     lines.push(missing.length ? "Missing Obsidian APIs: " + missing.join("; ") : "Obsidian APIs: ok");
     const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
     if (view) {
       const host = this.getHost(view);
-      lines.push(`Active note (${view.getMode()}): host ${host ? "found <" + host.className.split(" ")[0] + ">" : "NOT found, using fallback"}`);
+      lines.push(
+        `Active note (${view.getMode()}): host ${host ? "found <" + host.className.split(" ")[0] + ">" : "NOT found, using fallback"}`
+      );
       const vs = this.views.get(view);
-      lines.push(vs ? `Panes: ${vs.panes.length} + All backlinks, attached: ${vs.el.isConnected}` : "No panes created for this note yet");
+      lines.push(
+        vs ? `Panes: ${vs.panes.length} + All backlinks, attached: ${vs.el.isConnected}` : "No panes created for this note yet"
+      );
+      if (vs?.listError || vs?.panes.some((p) => p.parseErrors.length))
+        lines.push("Frontmatter has errors: pane settings aren't saved.");
     } else lines.push("No active note.");
+    lines.push(`Note views tracked: ${this.views.size}`);
     return lines;
   }
-  destroyView(view) {
-    var _a, _b;
-    const vs = this.views.get(view);
-    if (!vs) return;
-    (_a = vs.observer) == null ? void 0 : _a.disconnect();
-    for (const p of vs.panes) p.component.unload();
-    (_b = vs.base) == null ? void 0 : _b.component.unload();
-    vs.el.remove();
-    this.views.delete(view);
-    this.allViews.delete(vs);
-  }
-  refreshAll() {
-    this.app.workspace.iterateAllLeaves((leaf) => {
-      var _a;
-      if (!(leaf.view instanceof import_obsidian.MarkdownView)) return;
-      try {
-        this.refreshView(leaf.view);
-      } catch (e) {
-        console.error("[backlinks-full-view] refresh failed for", (_a = leaf.view.file) == null ? void 0 : _a.path, e);
-      }
+  /** First sight of a view: tear its state down when it closes (BFV-01) and notice when it's shown again. */
+  observeView(view) {
+    if (this.observed.has(view)) return;
+    this.observed.add(view);
+    this.roViews.set(view.containerEl, view);
+    this.ro?.observe(view.containerEl);
+    view.register(() => {
+      this.ro?.unobserve(view.containerEl);
+      this.destroyView(view);
     });
   }
-  getBacklinkSources(file) {
+  destroyView(view) {
+    const vs = this.views.get(view);
+    if (!vs) return;
+    this.flush(vs);
+    vs.observer?.disconnect();
+    for (const p of vs.panes) p.component.unload();
+    vs.base?.component.unload();
+    vs.el.remove();
+    this.views.delete(view);
+  }
+  // ---------- refresh scheduling ----------
+  /**
+   * One debounced pass over the open note views. A view is rebuilt only when it's new, switched note, was
+   * skipped while hidden, or a changed path touches it (its note, one of its sources, or a note that now links
+   * to it); query panes re-run only after a Dataview index event. Hidden views are skipped and marked stale.
+   */
+  runRefresh() {
+    const all = this.pendingAll, layout = this.pendingLayout, dv = this.pendingDv;
+    const paths = this.pendingPaths, forced = this.pendingViews;
+    this.pendingAll = this.pendingLayout = this.pendingDv = false;
+    this.pendingPaths = /* @__PURE__ */ new Set();
+    this.pendingViews = /* @__PURE__ */ new Set();
+    this.queryCache.clear();
+    const jobs = [];
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const view = leaf.view;
+      if (!(view instanceof import_obsidian.MarkdownView)) return;
+      this.observeView(view);
+      const vs = this.views.get(view);
+      if (!view.file) {
+        if (vs) this.destroyView(view);
+        return;
+      }
+      if (!view.containerEl.isShown()) {
+        if (vs && (all || paths.size || dv || vs.notePath !== view.file.path)) vs.stale = true;
+        return;
+      }
+      if (!vs || all || forced.has(view) || vs.stale || vs.notePath !== view.file.path) {
+        jobs.push({ view, needSources: true });
+        return;
+      }
+      if (layout) this.attach(vs, this.hostFor(view));
+      if (paths.size && this.affects(vs, paths)) jobs.push({ view, needSources: true });
+      else if (dv && vs.panes.some((p) => !p.deferred && p.config.query.trim())) jobs.push({ view, needSources: false });
+    });
+    if (!jobs.length) return;
+    const targets = new Set(jobs.filter((j) => j.needSources).map((j) => j.view.file.path));
+    const index = targets.size ? this.backlinkIndex(targets) : null;
+    for (const j of jobs) {
+      try {
+        this.refreshView(j.view, index?.get(j.view.file.path) ?? null);
+      } catch (e) {
+        console.error("[backlinks-full-view] refresh failed for", j.view.file?.path, e);
+      }
+    }
+  }
+  affects(vs, paths) {
     const resolved = this.app.metadataCache.resolvedLinks;
-    const out = [];
+    const note = vs.notePath ?? "";
+    for (const p of paths) {
+      if (p === note || vs.sourcePaths.has(p) || resolved[p]?.[note]) return true;
+      if (vs.panes.some((pane) => pane.items.has(p))) return true;
+    }
+    return false;
+  }
+  /** Backlink sources of every target path, in one pass over the resolved-link table. */
+  backlinkIndex(targets) {
+    const resolved = this.app.metadataCache.resolvedLinks;
+    const out = /* @__PURE__ */ new Map();
+    for (const t of targets) out.set(t, []);
+    const few = targets.size <= 8;
     for (const src in resolved) {
-      if (src === file.path || !resolved[src][file.path]) continue;
-      const f = this.app.vault.getAbstractFileByPath(src);
-      if (f instanceof import_obsidian.TFile && f.extension === "md") out.push(f);
+      const links = resolved[src];
+      let f;
+      const add = (t) => {
+        if (t === src) return;
+        if (f === void 0) {
+          const a = this.app.vault.getAbstractFileByPath(src);
+          f = a instanceof import_obsidian.TFile && a.extension === "md" ? a : null;
+        }
+        if (f) out.get(t).push(f);
+      };
+      if (few) {
+        for (const t of targets) if (links[t]) add(t);
+      } else for (const t in links) if (targets.has(t)) add(t);
     }
     return out;
   }
+  verOf(path) {
+    return this.versions.get(path) ?? 0;
+  }
   /**
-   * Where to inject the panes. Prefers the scrolling content container so the panes scroll with the note.
-   * Class names below are Obsidian/CodeMirror internals, so several candidates are tried and the
-   * documented `view.contentEl` is the last resort.
+   * Where to inject the panes, in the view's own mode only (never a nested embed's renderer):
+   * - Reading view: the preview renderer's footer section, where core Backlinks puts its in-document list.
+   *   It's a section of the renderer, so scrolling/re-rendering keeps it instead of stripping it.
+   * - Editing modes: the editor's `.cm-sizer`, so the panes scroll with the note.
+   * These are Obsidian internals (checked in 1.15.0); `view.contentEl` is the fallback.
    */
   getHost(view) {
-    const c = view.containerEl;
-    const sels = view.getMode() === "preview" ? [".markdown-preview-sizer", ".markdown-preview-view"] : [".cm-sizer", ".cm-scroller"];
-    for (const sel of sels) {
-      const el = c.querySelector(sel);
-      if (el) return el;
-    }
-    return null;
+    const el = view.getMode() === "preview" ? view.previewMode?.renderer?.footer?.el : view.editMode?.sizerEl;
+    return el instanceof HTMLElement ? el : null;
+  }
+  hostFor(view) {
+    const host = this.getHost(view);
+    if (host) return host;
+    this.warnOnce(
+      "host-" + view.getMode(),
+      `Could not find the ${view.getMode()} content container (Obsidian's internals may have changed); falling back to the view's content element.`
+    );
+    return view.contentEl;
+  }
+  attach(vs, host) {
+    if (vs.el.parentElement === host) return;
+    host.appendChild(vs.el);
+    vs.host = host;
+    this.watchHost(vs, host);
   }
   warnOnce(key, msg) {
     if (this.warned.has(key)) return;
     this.warned.add(key);
     console.warn("[backlinks-full-view] " + msg);
   }
-  /** Watch the host so the container is put back if the editor re-renders and drops it. */
+  /** Watch the host so the container is put back if something removes it from there. */
   watchHost(vs, host) {
-    var _a;
-    (_a = vs.observer) == null ? void 0 : _a.disconnect();
+    vs.observer?.disconnect();
     vs.observer = new MutationObserver(() => {
-      var _a2;
-      if (vs.el.isConnected) return;
+      if (vs.el.parentElement === host) return;
       const now = Date.now();
       if (now - vs.reattachSince > 3e3) {
         vs.reattachSince = now;
         vs.reattachCount = 0;
       }
       if (++vs.reattachCount > 5) {
-        (_a2 = vs.observer) == null ? void 0 : _a2.disconnect();
+        vs.observer?.disconnect();
         this.warnOnce("fight", "The editor keeps removing the backlinks panel; giving up re-attaching.");
         return;
       }
@@ -353,34 +704,45 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     });
     vs.observer.observe(host, { childList: true });
   }
-  createViewState(host) {
+  createViewState(view, host) {
     const el = host.createDiv({ cls: "bfv-container" });
     this.wireLinks(el);
+    const warnEl = el.createDiv({ cls: "bfv-config-error bfv-hidden" });
     const addBtn = el.createEl("button", { cls: "bfv-add", text: "+ Add backlinks pane" });
     const vs = {
+      view,
       el,
+      warnEl,
       addBtn,
+      host,
       panes: [],
       base: null,
       notePath: null,
+      gen: 0,
+      baseList: [],
       savedJson: "",
+      prevJson: "",
+      listError: "",
       dirty: false,
+      configPending: false,
       graceUntil: 0,
+      saveSoon: (0, import_obsidian.debounce)(() => this.flush(vs), CONFIG_SAVE_DELAY, true),
+      saveLater: (0, import_obsidian.debounce)(() => this.flush(vs), OPEN_SAVE_DELAY, true),
+      sources: [],
+      sourcePaths: /* @__PURE__ */ new Set(),
+      srcSig: "",
+      stale: false,
       observer: null,
       reattachCount: 0,
-      reattachSince: 0,
-      save: (0, import_obsidian.debounce)(() => void this.writeConfig(vs), 600, true)
+      reattachSince: 0
     };
+    this.watchHost(vs, host);
     addBtn.addEventListener("click", () => {
-      var _a;
-      const file = vs.notePath ? this.app.vault.getAbstractFileByPath(vs.notePath) : null;
-      const pane = this.createPanel(vs, defaults());
+      const pane = this.createPanel(vs, defaults(), null);
       vs.panes.push(pane);
       this.updateTitles(vs);
-      (_a = pane.el.querySelector(".bfv-header")) == null ? void 0 : _a.click();
-      if (file instanceof import_obsidian.TFile) this.refreshPane(pane, file, this.getBacklinkSources(file));
-      vs.dirty = true;
-      vs.save();
+      pane.el.querySelector(".bfv-header")?.click();
+      this.persist(pane);
     });
     return vs;
   }
@@ -391,121 +753,138 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       p.titleEl.setText(title || (vs.panes.length > 1 ? `${base} \xB7 ${i + 1}` : base));
     });
   }
+  /** Removes a pane at once and offers an Undo notice that puts it back (no confirm dialog). */
   removePane(vs, st) {
     const i = vs.panes.indexOf(st);
     if (i < 0) return;
+    const notePath = vs.notePath, gen = vs.gen;
+    const cfg = clone(st.config), raw = st.raw, title = st.titleEl.getText();
     st.component.unload();
     st.el.remove();
     vs.panes.splice(i, 1);
     this.updateTitles(vs);
-    vs.dirty = true;
-    vs.save();
-    this.refreshAll();
+    this.markDirty(vs);
+    const notice = new import_obsidian.Notice(
+      createFragment((f) => {
+        f.appendText(`Removed pane \u201C${title}\u201D. `);
+        f.createEl("button", { text: "Undo" }).addEventListener("click", () => {
+          notice.hide();
+          if (vs.gen !== gen || vs.notePath !== notePath || !this.views.has(vs.view)) {
+            new import_obsidian.Notice("Can't undo: that note is no longer open in the same view.");
+            return;
+          }
+          const pane = this.createPanel(vs, cfg, { raw, src: null, errors: [] });
+          const at = Math.min(i, vs.panes.length);
+          vs.el.insertBefore(pane.el, vs.panes[at]?.el ?? vs.addBtn);
+          vs.panes.splice(at, 0, pane);
+          this.updateTitles(vs);
+          this.persist(pane);
+        });
+      }),
+      1e4
+    );
   }
-  refreshView(view) {
+  refreshView(view, sources) {
     const file = view.file;
-    if (!file) return this.destroyView(view);
-    let host = this.getHost(view);
-    if (!host) {
-      this.warnOnce(
-        "host-" + view.getMode(),
-        `Could not find the ${view.getMode()} content container (Obsidian's DOM may have changed); falling back to the view's content element.`
-      );
-      host = view.contentEl;
-    }
+    const host = this.hostFor(view);
     let vs = this.views.get(view);
-    if (vs && vs.el.parentElement !== host) {
-      host.appendChild(vs.el);
-      vs.panes.forEach((p) => p.signature = "");
-      if (vs.base) vs.base.signature = "";
-      this.watchHost(vs, host);
-    }
     if (!vs) {
-      vs = this.createViewState(host);
+      vs = this.createViewState(view, host);
       this.views.set(view, vs);
-      this.allViews.add(vs);
-      this.watchHost(vs, host);
+    } else this.attach(vs, host);
+    vs.stale = false;
+    if (!sources && !vs.notePath) sources = this.backlinkIndex(/* @__PURE__ */ new Set([file.path])).get(file.path);
+    if (sources) {
+      vs.sources = sources;
+      vs.sourcePaths = new Set(sources.map((s) => s.path));
+      vs.srcSig = sources.map((s) => s.path + ":" + this.verOf(s.path)).join(",");
     }
     const switched = vs.notePath !== file.path;
     this.loadConfig(vs, file);
     if (switched || !vs.base) this.resetBase(vs);
     vs.el.appendChild(vs.addBtn);
-    if (vs.el.firstChild !== vs.base.el) vs.el.prepend(vs.base.el);
-    const sources = this.getBacklinkSources(file);
-    for (const pane of vs.panes) this.refreshPane(pane, file, sources);
-    this.refreshPane(vs.base, file, sources);
+    if (vs.el.children[1] !== vs.base.el) vs.warnEl.after(vs.base.el);
+    for (const pane of vs.panes) this.refreshPane(pane, file);
+    this.refreshPane(vs.base, file);
   }
+  /** Refresh one pane now (it was expanded, or its own config changed). */
   updatePane(st) {
     const f = st.view.notePath ? this.app.vault.getAbstractFileByPath(st.view.notePath) : null;
-    if (!(f instanceof import_obsidian.TFile)) return;
-    st.signature = "";
-    this.refreshPane(st, f, this.getBacklinkSources(f));
+    if (f instanceof import_obsidian.TFile) this.refreshPane(st, f, true);
   }
-  refreshPane(st, file, backlinks) {
+  refreshPane(st, file, force = false) {
+    if (st.dead) return;
+    const vs = st.view;
+    const q = st.config.query.trim();
     if (st.deferred) {
-      st.countEl.setText(st.config.query.trim() ? "" : String(backlinks.length));
+      st.countEl.setText(q ? "" : String(vs.sources.length));
       return;
     }
-    const q = st.config.query.trim();
-    const id = ++st.reqId;
+    if (st.collapsed && !force) {
+      st.stale = true;
+      if (!q && !st.search.trim() && !this.countRules(st.config.filter)) st.countEl.setText(String(vs.sources.length));
+      return;
+    }
+    st.stale = false;
     if (!q) {
       st.error = "";
-      return this.finishRefresh(st, file, backlinks, "");
+      return this.finishRefresh(st, vs.sources, "B|" + file.path + "|" + vs.srcSig);
     }
-    void this.runQuery(q, file).then((r) => {
-      var _a;
-      if (id !== st.reqId) return;
-      st.error = (_a = r.error) != null ? _a : "";
-      this.finishRefresh(st, file, r.files, q);
+    const key = q + "\0" + file.path;
+    if (st.queryKey === key && st.queryEpoch === this.dvEpoch && st.queryPaths) return this.finishQuery(st, file, q);
+    const id = ++st.reqId;
+    const epoch = this.dvEpoch;
+    void this.runQueryCached(q, file).then((r) => {
+      if (id !== st.reqId || st.dead) return;
+      st.queryKey = key;
+      st.queryEpoch = epoch;
+      st.queryPaths = r.paths;
+      st.error = r.error ?? "";
+      this.finishQuery(st, file, q);
     });
   }
-  /** Runs a Dataview query (DQL) and collects the notes it references. */
+  finishQuery(st, file, q) {
+    const files = [];
+    for (const p of st.queryPaths ?? []) {
+      const f = this.app.vault.getAbstractFileByPath(p);
+      if (f instanceof import_obsidian.TFile && f.extension === "md") files.push(f);
+    }
+    const sig = "Q|" + q + "|" + st.error + "|" + file.path + "|" + files.map((f) => f.path + ":" + this.verOf(f.path)).join(",");
+    this.finishRefresh(st, files, sig);
+  }
+  runQueryCached(query, origin) {
+    const key = query + "\0" + origin.path;
+    let p = this.queryCache.get(key);
+    if (!p) {
+      p = this.runQuery(query, origin);
+      this.queryCache.set(key, p);
+    }
+    return p;
+  }
+  /**
+   * Runs a Dataview query (DQL) and collects the notes it lists: a TABLE's first column (all columns when
+   * grouped), a LIST's items (and grouped values), TASK items' files, CALENDAR links.
+   */
   async runQuery(query, origin) {
-    var _a, _b, _c, _d, _e, _f, _g;
-    const dv = (_c = (_b = (_a = this.app.plugins) == null ? void 0 : _a.plugins) == null ? void 0 : _b.dataview) == null ? void 0 : _c.api;
-    if (!dv) return { files: [], error: "Dataview plugin is not installed or enabled." };
+    const dv = this.app.plugins?.plugins?.dataview?.api;
+    if (!dv) return { paths: [], error: "Dataview plugin is not installed or enabled." };
     try {
       const res = await dv.query(query, origin.path);
-      if (!(res == null ? void 0 : res.successful)) return { files: [], error: "Dataview: " + String((_d = res == null ? void 0 : res.error) != null ? _d : "query failed") };
-      const paths = /* @__PURE__ */ new Set();
-      const walk = (v, depth) => {
-        var _a2;
-        if (v == null || depth > 5 || typeof v !== "object") return;
-        if (typeof v.path === "string") {
-          paths.add(v.path);
-          return;
-        }
-        if (typeof ((_a2 = v.file) == null ? void 0 : _a2.path) === "string") {
-          paths.add(v.file.path);
-          return;
-        }
-        if (Array.isArray(v)) {
-          for (const x of v) walk(x, depth + 1);
-          return;
-        }
-        if (Array.isArray(v.values)) {
-          for (const x of v.values) walk(x, depth + 1);
-          return;
-        }
-        if (Object.getPrototypeOf(v) === Object.prototype) for (const x of Object.values(v)) walk(x, depth + 1);
-      };
-      walk((_f = (_e = res.value) == null ? void 0 : _e.values) != null ? _f : res.value, 0);
-      const files = [];
-      for (const p of paths) {
+      if (!res?.successful) return { paths: [], error: "Dataview: " + String(res?.error ?? "query failed") };
+      const paths = notePathsInResult(res.value);
+      const out = [...paths].filter((p) => {
         const f = this.app.vault.getAbstractFileByPath(p);
-        if (f instanceof import_obsidian.TFile && f.extension === "md") files.push(f);
-      }
-      return { files, error: files.length ? void 0 : "The query returned no note links (use LIST or TABLE with file.link)." };
+        return f instanceof import_obsidian.TFile && f.extension === "md";
+      });
+      return {
+        paths: out,
+        error: out.length ? void 0 : "The query returned no note links (use LIST or TABLE with file.link)."
+      };
     } catch (e) {
-      return { files: [], error: "Dataview: " + String((_g = e == null ? void 0 : e.message) != null ? _g : e) };
+      return { paths: [], error: "Dataview: " + String(e?.message ?? e) };
     }
   }
-  finishRefresh(st, file, sources, q) {
-    const sig = q + "|" + st.error + "|" + file.path + "|" + sources.map((s) => {
-      var _a;
-      const fm = (_a = this.app.metadataCache.getFileCache(s)) == null ? void 0 : _a.frontmatter;
-      return s.path + ":" + s.stat.mtime + ":" + JSON.stringify(fm != null ? fm : {});
-    }).join(",");
+  finishRefresh(st, sources, sig) {
     if (sig === st.signature) return;
     st.signature = sig;
     this.sync(st, sources);
@@ -523,19 +902,18 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
    * failed, when an empty or partial result would wrongly wipe the list.
    */
   pruneOpen(st) {
-    var _a, _b, _c, _d;
     if (!st.config.open.length || st.error || !this.linksReady()) return;
-    if (st.config.query && !((_d = (_c = (_b = (_a = this.app.plugins) == null ? void 0 : _a.plugins) == null ? void 0 : _b.dataview) == null ? void 0 : _c.index) == null ? void 0 : _d.initialized)) return;
+    if (st.config.query && !this.app.plugins?.plugins?.dataview?.index?.initialized) return;
     const keep = st.config.open.filter((p) => st.items.has(p));
     if (keep.length === st.config.open.length) return;
     const gone = st.config.open.filter((p) => !st.items.has(p));
     for (const p of gone) st.opened.delete(p);
     st.openOrder = st.openOrder.filter((p) => st.items.has(p));
     st.config.open = keep;
-    this.persist(st);
+    this.persist(st, true);
   }
   // ---------- panel skeleton ----------
-  createPanel(vs, config, ephemeral = false) {
+  createPanel(vs, config, entry, ephemeral = false) {
     const el = vs.el.createDiv({ cls: PANEL_CLASS });
     vs.el.appendChild(vs.addBtn);
     const component = new import_obsidian.Component();
@@ -547,8 +925,9 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     const rmBtn = header.createEl("button", {
       cls: "bfv-icon-btn bfv-remove",
       text: "\u2715",
-      attr: { "aria-label": "Remove this backlinks pane" }
+      attr: { "aria-label": "Remove this backlinks pane (can be undone)" }
     });
+    const warnEl = el.createDiv({ cls: "bfv-config-error bfv-hidden" });
     const body = el.createDiv({ cls: "bfv-body" });
     const bar = body.createDiv({ cls: "bfv-toolbar" });
     const sortBtn = bar.createEl("button", { cls: "bfv-tool-btn" });
@@ -557,9 +936,14 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       cls: "bfv-filter",
       type: "text",
       placeholder: 'Search\u2026 (a b, a OR b, NOT a, "a phrase", ( ))',
-      attr: { title: 'Adjacent words must all match. Use OR, NOT (or -word), "quoted phrases" and parentheses; operators in capitals.' }
+      attr: {
+        title: 'Adjacent words must all match. Use OR, NOT (or -word, -"phrase", -(group)), "quoted phrases" and parentheses; operators in capitals.'
+      }
     });
-    const ftLabel = bar.createEl("label", { cls: "bfv-fulltext", attr: { title: "Also search the text of every note in this pane" } });
+    const ftLabel = bar.createEl("label", {
+      cls: "bfv-fulltext",
+      attr: { title: "Also search the text of every note in this pane" }
+    });
     const ftBox = ftLabel.createEl("input", { type: "checkbox" });
     ftLabel.appendText("Full text");
     const titleInput = body.createEl("input", {
@@ -582,6 +966,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       el,
       listEl,
       countEl,
+      warnEl,
       filterBtn,
       sortBtn,
       filterPanel,
@@ -590,25 +975,34 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       // every pane starts collapsed and is built on first expand
       signature: "",
       collapsed: true,
+      stale: false,
+      dead: false,
       ephemeral,
       deferred: true,
       opened: new Set(config.open),
       openOrder: [...config.open].reverse(),
       items: /* @__PURE__ */ new Map(),
+      order: [],
+      needsSort: true,
       propDefs: [...FILE_PROPS],
+      propDefsKey: "",
       types: /* @__PURE__ */ new Map(),
       search: "",
       emptyEl,
       fullText: false,
       searchId: 0,
-      itemsVersion: 0,
-      sortedKey: "",
       titleEl,
       queryInput,
       titleInput,
       reqId: 0,
+      queryKey: "",
+      queryEpoch: -1,
+      queryPaths: null,
       error: "",
       config,
+      raw: entry?.raw ?? null,
+      srcIndex: entry?.src ?? null,
+      parseErrors: entry?.errors ?? [],
       view: vs,
       renderEditors: () => {
         if (!filterPanel.hasClass("bfv-hidden")) this.renderFilterEditor(st);
@@ -623,6 +1017,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         sortBtn.toggleClass("is-active", ns > 0);
       }
     };
+    this.showPaneErrors(st);
     const applyCollapse = () => {
       el.toggleClass("is-collapsed", st.collapsed);
       chev.setText(st.collapsed ? "\u25B8" : "\u25BE");
@@ -630,10 +1025,12 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     header.addEventListener("click", () => {
       st.collapsed = !st.collapsed;
       applyCollapse();
-      if (!st.collapsed && st.deferred) {
-        st.deferred = false;
-        this.updatePane(st);
+      if (st.collapsed) {
+        this.releaseBodies(st);
+        return;
       }
+      st.deferred = false;
+      this.updatePane(st);
     });
     applyCollapse();
     if (ephemeral) {
@@ -650,41 +1047,92 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       sortPanel.toggleClass("bfv-hidden", !sortPanel.hasClass("bfv-hidden"));
       st.renderEditors();
     });
-    const onSearch = (0, import_obsidian.debounce)(() => {
-      st.search = searchInput.value;
-      this.applyView(st);
-    }, 150, true);
+    const onSearch = (0, import_obsidian.debounce)(
+      () => {
+        if (!st.dead) {
+          st.search = searchInput.value;
+          this.applyView(st);
+        }
+      },
+      150,
+      true
+    );
     searchInput.addEventListener("input", onSearch);
     ftBox.addEventListener("change", () => {
       st.fullText = ftBox.checked;
+      if (!st.fullText) this.releaseBodies(st);
       this.applyView(st);
     });
-    const onQuery = (0, import_obsidian.debounce)(() => {
+    const onQuery = (0, import_obsidian.debounce)(
+      () => {
+        if (!st.dead) this.updatePane(st);
+      },
+      600,
+      true
+    );
+    queryInput.addEventListener("input", () => {
       st.config.query = queryInput.value.trim();
       this.persist(st);
       this.updateTitles(st.view);
-      this.updatePane(st);
-    }, 600, true);
-    queryInput.addEventListener("input", onQuery);
-    const onTitle = (0, import_obsidian.debounce)(() => {
+      onQuery();
+    });
+    titleInput.addEventListener("input", () => {
       st.config.title = titleInput.value.trim();
       this.persist(st);
       this.updateTitles(st.view);
-    }, 400, true);
-    titleInput.addEventListener("input", onTitle);
+    });
     rmBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       this.removePane(vs, st);
     });
+    component.register(() => {
+      st.dead = true;
+      onQuery.cancel();
+      onSearch.cancel();
+      this.releaseBodies(st);
+    });
     st.updateButtons();
     return st;
   }
+  showPaneErrors(st) {
+    const errs = st.parseErrors;
+    st.warnEl.toggleClass("bfv-hidden", errs.length === 0);
+    st.warnEl.setText(
+      errs.length ? `\u26A0 Couldn't read this pane's frontmatter: ${errs.join("; ")}. Changes to this note's panes aren't saved until it's fixed.` : ""
+    );
+  }
+  showViewErrors(vs) {
+    const bad = vs.listError || vs.panes.some((p) => p.parseErrors.length);
+    vs.warnEl.toggleClass("bfv-hidden", !bad);
+    vs.warnEl.setText(
+      vs.listError ? `\u26A0 ${vs.listError}. Pane settings for this note aren't saved until it's fixed.` : bad ? "\u26A0 A pane below has frontmatter errors; pane settings for this note aren't saved until they're fixed." : ""
+    );
+  }
   // ---------- config editing UI ----------
-  /** Mark a pane's settings as changed and schedule a frontmatter write (never for the built-in pane). */
-  persist(st) {
-    if (st.ephemeral) return;
-    st.view.dirty = true;
-    st.view.save();
+  /**
+   * Mark a pane's settings as changed and schedule a frontmatter write (never for the built-in pane).
+   * `openOnly`: just the expanded-cards list changed, which is written after a long delay.
+   */
+  persist(st, openOnly = false) {
+    if (st.ephemeral || st.dead) return;
+    this.markDirty(st.view, openOnly);
+  }
+  markDirty(vs, openOnly = false) {
+    vs.dirty = true;
+    if (openOnly && !vs.configPending) {
+      vs.saveLater();
+      return;
+    }
+    vs.configPending = true;
+    vs.saveLater.cancel();
+    vs.saveSoon();
+  }
+  /** Write pending edits now. */
+  flush(vs) {
+    vs.saveSoon.cancel();
+    vs.saveLater.cancel();
+    vs.configPending = false;
+    void this.writeConfig(vs);
   }
   /** (Re)creates the built-in "All backlinks" pane (shown first): collapsed, unsaved, built on first expand. */
   resetBase(vs) {
@@ -692,7 +1140,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       vs.base.component.unload();
       vs.base.el.remove();
     }
-    vs.base = this.createPanel(vs, defaults(), true);
+    vs.base = this.createPanel(vs, defaults(), null, true);
     vs.base.titleEl.setText("All backlinks");
   }
   /** Called after any filter/sort edit. structural=true re-renders editors (including the source). */
@@ -709,26 +1157,41 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   //     filter: '<one-line JSON>'
   //     sort: '<one-line JSON>'
   //     query: 'LIST FROM ...'
-  //   - filter:
-  //     sort:
-  parseList(raw) {
-    const arr = Array.isArray(raw) ? raw : raw && typeof raw === "object" ? [raw] : [];
-    const out = arr.map(
-      (e) => this.parseConfig({ title: e == null ? void 0 : e.title, filter: this.jsonish(e == null ? void 0 : e.filter), sort: this.jsonish(e == null ? void 0 : e.sort), query: e == null ? void 0 : e.query, open: this.jsonish(e == null ? void 0 : e.open) })
-    );
-    return out;
+  //     open: [paths of expanded cards]
+  //
+  // Writes are skipped when nothing would change, refused while any entry can't be read, keep unknown keys
+  // and values the user wrote in another accepted form, and merge with whatever is on disk at write time.
+  hasErrors(vs) {
+    return !!vs.listError || vs.baseList.some((e) => e.errors.length > 0);
   }
   loadConfig(vs, file) {
-    var _a;
     const switched = vs.notePath !== file.path;
-    if (!switched && (vs.dirty || Date.now() < vs.graceUntil)) return;
-    const fm = (_a = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a.frontmatter;
-    const list = this.parseList(fm == null ? void 0 : fm.backlinks);
-    const json = JSON.stringify(list);
-    if (!switched && json === vs.savedJson) return;
-    if (switched && vs.dirty) void this.writeConfig(vs);
+    if (switched && vs.notePath !== null) {
+      this.flush(vs);
+      vs.gen++;
+      vs.graceUntil = 0;
+    }
+    const parsed = parseList(this.app.metadataCache.getFileCache(file)?.frontmatter?.backlinks);
+    const json = listJson(parsed.entries);
+    if (!switched) {
+      if (json === vs.savedJson && parsed.error === vs.listError) {
+        vs.baseList = parsed.entries;
+        if (!vs.dirty)
+          vs.panes.forEach((p, i) => {
+            p.raw = parsed.entries[i]?.raw ?? p.raw;
+            p.srcIndex = i;
+          });
+        return;
+      }
+      if (Date.now() < vs.graceUntil && json === vs.prevJson) return;
+      const readable = !parsed.error && !parsed.entries.some((e) => e.errors.length) && !this.hasErrors(vs);
+      if (vs.dirty && readable) {
+        this.flush(vs);
+        return;
+      }
+    }
     vs.notePath = file.path;
-    vs.savedJson = json;
+    vs.listError = parsed.error;
     vs.dirty = false;
     if (switched) {
       for (const p of vs.panes) {
@@ -737,98 +1200,118 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       }
       vs.panes = [];
     }
-    while (vs.panes.length > list.length) {
+    this.applyEntries(vs, parsed.entries, switched);
+  }
+  /** Make the panes match a list read from (or just written to) the frontmatter, reusing existing panes. */
+  applyEntries(vs, entries, fresh) {
+    vs.baseList = entries;
+    vs.savedJson = vs.prevJson = listJson(entries);
+    while (vs.panes.length > entries.length) {
       const p = vs.panes.pop();
       p.component.unload();
       p.el.remove();
     }
-    list.forEach((cfg, i) => {
-      if (vs.panes[i]) {
-        vs.panes[i].config = cfg;
-        vs.panes[i].queryInput.value = cfg.query;
-        vs.panes[i].titleInput.value = cfg.title;
-        this.syncOpen(vs.panes[i]);
-        vs.panes[i].updateButtons();
-        if (!switched) {
-          vs.panes[i].renderEditors();
-          this.applyView(vs.panes[i]);
+    entries.forEach((e, i) => {
+      const cfg = clone(e.cfg);
+      const p = vs.panes[i];
+      if (p) {
+        p.config = cfg;
+        p.raw = e.raw;
+        p.srcIndex = e.src;
+        p.parseErrors = e.errors;
+        p.queryInput.value = cfg.query;
+        p.titleInput.value = cfg.title;
+        this.showPaneErrors(p);
+        this.syncOpen(p);
+        p.updateButtons();
+        if (!fresh) {
+          p.renderEditors();
+          this.applyView(p);
         }
       } else {
-        vs.panes.push(this.createPanel(vs, cfg));
+        vs.panes.push(this.createPanel(vs, cfg, e));
       }
     });
     this.updateTitles(vs);
-  }
-  /** Accepts a JSON string (current format) or an already-parsed value (hand-written YAML). */
-  jsonish(v) {
-    if (typeof v !== "string") return v;
-    try {
-      return JSON.parse(v);
-    } catch (e) {
-      return void 0;
-    }
-  }
-  parseConfig(raw) {
-    var _a;
-    const d = defaults();
-    if (!raw || typeof raw !== "object") return d;
-    const r = raw;
-    const filter = (_a = this.sanitizeGroup(r.filter)) != null ? _a : d.filter;
-    const sorts = Array.isArray(r.sort) ? r.sort.filter((x) => x && typeof x.prop === "string").map((x) => ({ prop: x.prop, dir: x.dir === "desc" ? "desc" : "asc" })) : d.sorts;
-    const query = typeof r.query === "string" ? r.query.trim() : "";
-    const title = typeof r.title === "string" || typeof r.title === "number" ? String(r.title).trim() : "";
-    const open = Array.isArray(r.open) ? [...new Set(r.open.filter((x) => typeof x === "string" && x !== ""))].slice(0, MAX_OPEN_SAVED) : [];
-    return { title, filter, sorts, query, open };
-  }
-  sanitizeGroup(x) {
-    var _a;
-    if (!x || typeof x !== "object" || !Array.isArray(x.children)) return null;
-    const children = [];
-    for (const c of x.children) {
-      if (Array.isArray(c == null ? void 0 : c.children)) {
-        const g = this.sanitizeGroup(c);
-        if (g) children.push(g);
-      } else if (typeof (c == null ? void 0 : c.prop) === "string" && typeof (c == null ? void 0 : c.op) === "string") {
-        children.push({ type: "rule", prop: c.prop, op: c.op, value: String((_a = c.value) != null ? _a : "") });
-      }
-    }
-    const mode = x.mode === "or" || x.mode === "not" ? x.mode : "and";
-    return { type: "group", mode, children };
+    this.showViewErrors(vs);
   }
   async writeConfig(vs) {
-    var _a;
-    const file = vs.notePath ? this.app.vault.getAbstractFileByPath(vs.notePath) : null;
-    if (!(file instanceof import_obsidian.TFile)) return;
-    if (typeof ((_a = this.app.fileManager) == null ? void 0 : _a.processFrontMatter) !== "function") return;
-    const def = defaults();
-    const list = this.parseList(vs.panes.map((p) => ({
-      title: p.config.title,
-      filter: JSON.parse(JSON.stringify(p.config.filter)),
-      sort: JSON.parse(JSON.stringify(p.config.sorts)),
-      query: p.config.query,
-      open: p.config.open
-    })));
-    const allDefault = list.length === 0;
-    vs.savedJson = JSON.stringify(list);
+    if (!vs.dirty) return;
     vs.dirty = false;
+    const path = vs.notePath, gen = vs.gen;
+    const file = path ? this.app.vault.getAbstractFileByPath(path) : null;
+    if (!(file instanceof import_obsidian.TFile)) return;
+    if (typeof this.app.fileManager?.processFrontMatter !== "function") return;
+    if (this.hasErrors(vs)) return;
+    const base = vs.baseList;
+    const ours = vs.panes.map((p) => ({ cfg: clone(p.config), raw: p.raw, errors: [], src: p.srcIndex }));
+    const cachedRaw = this.app.metadataCache.getFileCache(file)?.frontmatter?.backlinks;
+    const cached = parseList(cachedRaw);
+    if (cached.error || cached.entries.some((e) => e.errors.length)) return;
+    const planned = merge(base, ours, cached.entries);
+    const plannedOut = planned.map((e) => serializeEntry(e));
+    if (JSON.stringify(plannedOut) === JSON.stringify(cachedRaw ?? [])) {
+      this.afterWrite(vs, gen, planned, ours);
+      return;
+    }
+    let written = planned;
+    vs.prevJson = vs.savedJson;
+    vs.savedJson = listJson(planned);
+    vs.baseList = planned;
     vs.graceUntil = Date.now() + 1500;
-    await this.app.fileManager.processFrontMatter(file, (fm) => {
-      if (allDefault) {
-        delete fm.backlinks;
-        return;
-      }
-      fm.backlinks = list.map((c) => ({
-        title: c.title || null,
-        filter: JSON.stringify(c.filter) === JSON.stringify(def.filter) ? null : JSON.stringify(c.filter),
-        sort: JSON.stringify(c.sorts) === JSON.stringify(def.sorts) ? null : JSON.stringify(c.sorts),
-        query: c.query || null,
-        open: c.open.length ? c.open : null
-      }));
-    });
+    try {
+      await this.app.fileManager.processFrontMatter(file, (fm) => {
+        const disk = parseList(fm.backlinks);
+        if (disk.error || disk.entries.some((e) => e.errors.length)) {
+          written = disk.entries;
+          return;
+        }
+        written = merge(base, ours, disk.entries);
+        const out = written.map((e) => serializeEntry(e));
+        if (JSON.stringify(out) === JSON.stringify(fm.backlinks ?? [])) return;
+        if (out.length === 0) delete fm.backlinks;
+        else fm.backlinks = out;
+      });
+    } catch (e) {
+      console.error("[backlinks-full-view] couldn't save pane settings to", path, e);
+      return;
+    }
+    this.afterWrite(vs, gen, written, ours);
+  }
+  /** Record what's on disk now; if the merge brought in changes made elsewhere, show them. */
+  afterWrite(vs, gen, written, ours) {
+    if (vs.gen !== gen || !this.views.has(vs.view)) return;
+    const entries = written.map((e, i) => ({ ...e, src: i }));
+    if (vs.dirty) {
+      vs.baseList = entries;
+      vs.savedJson = listJson(entries);
+      return;
+    }
+    if (listJson(written) === listJson(ours) && written.length === vs.panes.length) {
+      vs.baseList = entries;
+      vs.savedJson = listJson(entries);
+      vs.panes.forEach((p, i) => {
+        p.raw = entries[i].raw;
+        p.srcIndex = i;
+      });
+      return;
+    }
+    this.applyEntries(vs, entries, false);
+    const f = this.app.vault.getAbstractFileByPath(vs.notePath ?? "");
+    if (f instanceof import_obsidian.TFile) for (const p of vs.panes) this.refreshPane(p, f);
+  }
+  /** The property's inferred type (from the loaded notes), or the file property's type. */
+  knownType(st, id) {
+    return st.types.get(id) ?? FILE_PROPS.find((p) => p.id === id)?.type;
   }
   typeOf(st, id) {
-    var _a, _b, _c;
-    return (_c = (_b = st.types.get(id)) != null ? _b : (_a = FILE_PROPS.find((p) => p.id === id)) == null ? void 0 : _a.type) != null ? _c : "text";
+    return this.knownType(st, id) ?? "text";
+  }
+  /** The type a rule is evaluated as: the property's type if the operator fits it, else the operator's own. */
+  evalType(st, r) {
+    const t = this.knownType(st, r.prop);
+    if (t && OPS[t].includes(r.op)) return t;
+    return OP_TYPE_ORDER.find((x) => OPS[x].includes(r.op)) ?? t ?? "text";
   }
   propSelect(parent, st, current, onChange) {
     const sel = parent.createEl("select", { cls: "dropdown bfv-prop" });
@@ -853,7 +1336,11 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     const box = parentEl.createDiv({ cls: "bfv-group" });
     const head = box.createDiv({ cls: "bfv-group-head" });
     const modeSel = head.createEl("select", { cls: "dropdown" });
-    for (const [v, l] of [["and", "All"], ["or", "Any"], ["not", "None"]]) {
+    for (const [v, l] of [
+      ["and", "All"],
+      ["or", "Any"],
+      ["not", "None"]
+    ]) {
       modeSel.createEl("option", { value: v, text: l });
     }
     modeSel.value = group.mode;
@@ -885,13 +1372,10 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       this.configChanged(st, true);
     });
   }
+  /** Rendering never changes the rule: an operator that doesn't fit the inferred type is shown as saved. */
   renderRule(parentEl, rule, st, onRemove) {
     const row = parentEl.createDiv({ cls: "bfv-rule" });
-    const type = this.typeOf(st, rule.prop);
-    if (!OPS[type].includes(rule.op)) {
-      rule.op = OPS[type][0];
-      this.persist(st);
-    }
+    const type = this.knownType(st, rule.prop) ?? this.evalType(st, rule);
     this.propSelect(row, st, rule.prop, (v) => {
       rule.prop = v;
       const nt = this.typeOf(st, v);
@@ -900,22 +1384,38 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       this.configChanged(st, true);
     });
     const opSel = row.createEl("select", { cls: "dropdown bfv-op" });
-    for (const o of OPS[type]) opSel.createEl("option", { value: o, text: o });
+    const fits = OPS[type].includes(rule.op);
+    for (const o of fits ? OPS[type] : [...OPS[type], rule.op]) opSel.createEl("option", { value: o, text: o });
     opSel.value = rule.op;
+    if (!fits) {
+      opSel.addClass("bfv-op-mismatch");
+      opSel.title = `\u201C${rule.op}\u201D isn't a ${type} operator for the notes loaded now; it's kept as saved and evaluated as ${this.evalType(st, rule)}.`;
+    }
     opSel.addEventListener("change", () => {
       rule.op = opSel.value;
       this.configChanged(st, true);
     });
     if (!NO_VALUE.has(rule.op)) {
+      const vt = this.evalType(st, rule);
       const input = row.createEl("input", {
         cls: "bfv-value",
-        type: type === "number" ? "number" : "text",
-        placeholder: type === "date" ? "YYYY-MM-DD, today, today-7d" : "Value"
+        type: vt === "number" ? "number" : "text",
+        placeholder: vt === "date" ? "YYYY-MM-DD, today, today-7d" : "Value"
       });
       input.value = rule.value;
-      const commit = (0, import_obsidian.debounce)(() => this.configChanged(st, false), 200, true);
+      const commit = (0, import_obsidian.debounce)(
+        () => {
+          if (!st.dead) {
+            st.updateButtons();
+            this.applyView(st);
+          }
+        },
+        200,
+        true
+      );
       input.addEventListener("input", () => {
         rule.value = input.value;
+        this.persist(st);
         commit();
       });
     }
@@ -962,77 +1462,98 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     return g.children.reduce((n, c) => n + (c.type === "group" ? this.countRules(c) : 1), 0);
   }
   // ---------- data sync ----------
+  itemData(src) {
+    const cache = this.app.metadataCache.getFileCache(src);
+    const fm = cache?.frontmatter ?? {};
+    const props = {};
+    const labels = {};
+    const lists = /* @__PURE__ */ new Set();
+    for (const k of Object.keys(fm)) {
+      if (k === "position") continue;
+      const lk = k.toLowerCase();
+      props[lk] = toStrings(fm[k]);
+      if (!(lk in labels)) labels[lk] = k;
+      if (Array.isArray(fm[k])) lists.add(lk);
+    }
+    const tags = [
+      ...(cache?.tags ?? []).map((t) => t.tag.replace(/^#/, "")),
+      ...toStrings(fm.tags ?? fm.tag).map((t) => t.replace(/^#/, ""))
+    ];
+    return { props, labels, lists, tags };
+  }
+  /** Brings the pane's items in line with `sources`: unchanged notes are untouched, changed ones updated in place. */
   sync(st, sources) {
-    var _a, _b, _c;
     const seen = /* @__PURE__ */ new Set();
-    const keyLabels = /* @__PURE__ */ new Map();
+    let changed = false;
     for (const src of sources) {
       seen.add(src.path);
-      const cache = this.app.metadataCache.getFileCache(src);
-      const fm = (_a = cache == null ? void 0 : cache.frontmatter) != null ? _a : {};
-      const props = {};
-      const lists = /* @__PURE__ */ new Set();
-      for (const k of Object.keys(fm)) {
-        if (k === "position") continue;
-        const lk = k.toLowerCase();
-        props[lk] = toStrings(fm[k]);
-        if (Array.isArray(fm[k])) lists.add(lk);
-        if (!keyLabels.has(lk)) keyLabels.set(lk, k);
-      }
-      const tags = [
-        ...((_b = cache == null ? void 0 : cache.tags) != null ? _b : []).map((t) => t.tag.replace(/^#/, "")),
-        ...toStrings((_c = fm.tags) != null ? _c : fm.tag).map((t) => t.replace(/^#/, ""))
-      ];
-      const sig = src.stat.mtime + JSON.stringify(fm);
+      const ver = this.verOf(src.path);
       const old = st.items.get(src.path);
-      if (old && old.sig === sig) {
-        if (old.file.path !== src.path) st.itemsVersion++;
-        Object.assign(old, { file: src, props, lists, tags, hay: void 0 });
-        continue;
-      }
+      if (old && old.ver === ver && old.file === src) continue;
+      changed = true;
       if (old) {
-        st.component.removeChild(old.comp);
-        old.el.remove();
+        Object.assign(old, this.itemData(src), {
+          file: src,
+          ver,
+          hay: void 0,
+          sortFor: void 0,
+          sortKeys: void 0
+        });
+        old.invalidate();
+      } else {
+        st.items.set(src.path, this.createItem(st, src, ver));
       }
-      st.items.set(src.path, this.createItem(st, src, sig, props, lists, tags));
-      st.itemsVersion++;
     }
     for (const [path, it] of st.items) {
       if (!seen.has(path)) {
         st.component.removeChild(it.comp);
         it.el.remove();
         st.items.delete(path);
-        st.itemsVersion++;
+        changed = true;
+      }
+    }
+    if (!changed) return this.applyView(st);
+    st.needsSort = true;
+    this.buildCatalogue(st);
+    this.applyView(st);
+  }
+  /** Property list and type inference for the filter/sort editors, in one pass over the items. */
+  buildCatalogue(st) {
+    const stats = /* @__PURE__ */ new Map();
+    for (const it of st.items.values()) {
+      for (const lk in it.props) {
+        let s = stats.get(lk);
+        if (!s) {
+          s = { label: it.labels[lk] ?? lk, list: false, any: false, bool: true, num: true, date: true };
+          stats.set(lk, s);
+        }
+        if (it.lists.has(lk)) s.list = true;
+        if (s.list) continue;
+        for (const v of it.props[lk]) {
+          if (v === "") continue;
+          s.any = true;
+          if (s.bool && !/^(true|false)$/i.test(v)) s.bool = false;
+          if (s.num && isNaN(Number(v))) s.num = false;
+          if (s.date && !DATE_RE.test(v)) s.date = false;
+        }
       }
     }
     const defs = [...FILE_PROPS];
     st.types = new Map(FILE_PROPS.map((p) => [p.id, p.type]));
-    const items = [...st.items.values()];
-    for (const [lk, label] of [...keyLabels].sort((a, b) => a[1].localeCompare(b[1]))) {
-      const id = "note." + lk;
-      const type = this.inferType(items, lk);
-      defs.push({ id, label, type, group: "note" });
-      st.types.set(id, type);
+    for (const [lk, s] of [...stats].sort((a, b) => a[1].label.localeCompare(b[1].label))) {
+      const type = s.list ? "list" : !s.any ? "text" : s.bool ? "boolean" : s.num ? "number" : s.date ? "date" : "text";
+      defs.push({ id: "note." + lk, label: s.label, type, group: "note" });
+      st.types.set("note." + lk, type);
     }
     st.propDefs = defs;
-    st.renderEditors();
-    this.applyView(st);
-  }
-  inferType(items, lk) {
-    if (items.some((i) => i.lists.has(lk))) return "list";
-    const vals = items.flatMap((i) => {
-      var _a;
-      return (_a = i.props[lk]) != null ? _a : [];
-    }).filter((v) => v !== "");
-    if (!vals.length) return "text";
-    if (vals.every((v) => /^(true|false)$/i.test(v))) return "boolean";
-    if (vals.every((v) => !isNaN(Number(v)))) return "number";
-    if (vals.every((v) => DATE_RE.test(v))) return "date";
-    return "text";
+    const key = defs.map((d) => d.id + ":" + d.type).join(",");
+    if (key !== st.propDefsKey) {
+      st.propDefsKey = key;
+      st.renderEditors();
+    }
   }
   // ---------- evaluation ----------
   getVals(it, id) {
-    var _a;
     const f = it.file;
     switch (id) {
       case "file.name":
@@ -1052,154 +1573,202 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       case "file.tags":
         return it.tags;
     }
-    return id.startsWith("note.") ? (_a = it.props[id.slice(5)]) != null ? _a : [] : [];
+    return id.startsWith("note.") ? it.props[id.slice(5)] ?? [] : [];
   }
-  evalRule(st, it, r) {
-    var _a, _b, _c;
-    const type = this.typeOf(st, r.prop);
-    const vals = this.getVals(it, r.prop);
-    const present = vals.filter((v2) => v2 !== "");
-    if (r.op === "is empty") return present.length === 0;
-    if (r.op === "is not empty") return present.length > 0;
-    if (r.op === "is true") return ((_a = present[0]) == null ? void 0 : _a.toLowerCase()) === "true";
-    if (r.op === "is false") return ((_b = present[0]) == null ? void 0 : _b.toLowerCase()) === "false";
+  /** A rule as a predicate, with its type, operator and target value worked out once. */
+  compileRule(st, r) {
+    const present = (it) => this.getVals(it, r.prop).filter((v2) => v2 !== "");
+    switch (r.op) {
+      case "is empty":
+        return (it) => present(it).length === 0;
+      case "is not empty":
+        return (it) => present(it).length > 0;
+      case "is true":
+        return (it) => present(it)[0]?.toLowerCase() === "true";
+      case "is false":
+        return (it) => present(it)[0]?.toLowerCase() === "false";
+    }
     const raw = r.value.trim();
-    if (raw === "") return true;
+    if (raw === "") return () => true;
     const v = raw.toLowerCase();
-    const lower = present.map((x) => x.toLowerCase());
+    const type = this.evalType(st, r);
+    const op = r.op;
     if (type === "number") {
       const target = Number(raw);
-      if (isNaN(target)) return true;
-      const n = Number(present[0]);
-      if (!present.length || isNaN(n)) return r.op === "\u2260";
-      switch (r.op) {
-        case "=":
-          return n === target;
-        case "\u2260":
-          return n !== target;
-        case "<":
-          return n < target;
-        case "\u2264":
-          return n <= target;
-        case ">":
-          return n > target;
-        case "\u2265":
-          return n >= target;
-      }
-      return true;
+      if (isNaN(target)) return () => true;
+      return (it) => {
+        const p = present(it);
+        const n = Number(p[0]);
+        if (!p.length || isNaN(n)) return op === "\u2260";
+        switch (op) {
+          case "=":
+            return n === target;
+          case "\u2260":
+            return n !== target;
+          case "<":
+            return n < target;
+          case "\u2264":
+            return n <= target;
+          case ">":
+            return n > target;
+          case "\u2265":
+            return n >= target;
+        }
+        return true;
+      };
     }
     if (type === "date") {
       const t = normDate(raw);
-      const d = (_c = present[0]) == null ? void 0 : _c.slice(0, 10);
-      if (!d) return r.op === "is not";
-      switch (r.op) {
-        case "is":
-          return d === t;
-        case "is not":
-          return d !== t;
-        case "before":
-          return d < t;
-        case "after":
-          return d > t;
-        case "on or before":
-          return d <= t;
-        case "on or after":
-          return d >= t;
-      }
-      return true;
+      return (it) => {
+        const d = present(it)[0]?.slice(0, 10);
+        if (!d) return op === "is not";
+        switch (op) {
+          case "is":
+            return d === t;
+          case "is not":
+            return d !== t;
+          case "before":
+            return d < t;
+          case "after":
+            return d > t;
+          case "on or before":
+            return d <= t;
+          case "on or after":
+            return d >= t;
+        }
+        return true;
+      };
     }
+    const lower = (it) => present(it).map((x) => x.toLowerCase());
     if (type === "list") {
       const w = v.replace(/^#/, "");
-      const has = lower.some((x) => x === w || x.startsWith(w + "/"));
-      return r.op === "contains" ? has : !has;
+      const neg = op === "does not contain";
+      return (it) => {
+        const has = lower(it).some((x) => x === w || x.startsWith(w + "/"));
+        return neg ? !has : has;
+      };
     }
-    switch (r.op) {
+    switch (op) {
       case "is":
-        return lower.some((x) => x === v);
+        return (it) => lower(it).some((x) => x === v);
       case "is not":
-        return !lower.some((x) => x === v);
+        return (it) => !lower(it).some((x) => x === v);
       case "contains":
-        return lower.some((x) => x.includes(v));
+        return (it) => lower(it).some((x) => x.includes(v));
       case "does not contain":
-        return !lower.some((x) => x.includes(v));
+        return (it) => !lower(it).some((x) => x.includes(v));
       case "starts with":
-        return lower.some((x) => x.startsWith(v));
+        return (it) => lower(it).some((x) => x.startsWith(v));
       case "ends with":
-        return lower.some((x) => x.endsWith(v));
+        return (it) => lower(it).some((x) => x.endsWith(v));
     }
-    return true;
+    return () => true;
   }
-  evalNode(st, it, n) {
-    if (n.type === "rule") return this.evalRule(st, it, n);
-    if (!n.children.length) return true;
-    const res = n.children.map((c) => this.evalNode(st, it, c));
-    if (n.mode === "and") return res.every(Boolean);
-    if (n.mode === "or") return res.some(Boolean);
-    return !res.some(Boolean);
+  compileNode(st, n) {
+    if (n.type === "rule") return this.compileRule(st, n);
+    if (!n.children.length) return () => true;
+    const cs = n.children.map((c) => this.compileNode(st, c));
+    if (n.mode === "and") return (it) => cs.every((c) => c(it));
+    if (n.mode === "or") return (it) => cs.some((c) => c(it));
+    return (it) => !cs.some((c) => c(it));
   }
   /** Lower-cased path, tags and properties of a note: what a normal (not full-text) search looks in. */
   hayOf(it) {
-    return [
-      it.file.path,
-      ...it.tags,
-      ...Object.entries(it.props).flatMap(([k, vs]) => [k, ...vs])
-    ].join("\n").toLowerCase();
+    return [it.file.path, ...it.tags, ...Object.entries(it.props).flatMap(([k, vs]) => [k, ...vs])].join("\n").toLowerCase();
   }
-  /** Reads (and caches, lower-cased) the text of notes for full-text search, 100 at a time. */
+  /** Reads (and caches, lower-cased, shared across panes) the text of notes for full-text search, 100 at a time. */
   async loadBodies(items) {
     for (let i = 0; i < items.length; i += 100) {
-      await Promise.all(items.slice(i, i + 100).map(async (it) => {
-        if (it.body !== void 0) return;
-        try {
-          it.body = (await this.app.vault.cachedRead(it.file)).toLowerCase();
-        } catch (e) {
-          it.body = "";
-        }
-      }));
+      await Promise.all(
+        items.slice(i, i + 100).map(async (it) => {
+          const path = it.file.path;
+          if (this.bodies.has(path)) return;
+          let text = "";
+          try {
+            text = (await this.app.vault.cachedRead(it.file)).toLowerCase();
+          } catch {
+          }
+          if (this.fullTextPanes.size) this.bodies.set(path, text);
+        })
+      );
     }
   }
-  compareItems(st, a, b) {
-    for (const s of st.config.sorts) {
-      const t = this.typeOf(st, s.prop);
-      const av = this.getVals(a, s.prop).filter((x) => x !== "").join(", ");
-      const bv = this.getVals(b, s.prop).filter((x) => x !== "").join(", ");
-      if (!av && !bv) continue;
-      if (!av) return 1;
-      if (!bv) return -1;
-      let r = 0;
-      if (t === "number") {
-        r = Number(av) - Number(bv);
-        if (isNaN(r)) r = 0;
-      } else if (t === "date") r = av.slice(0, 16) < bv.slice(0, 16) ? -1 : av.slice(0, 16) > bv.slice(0, 16) ? 1 : 0;
-      else if (t === "boolean") r = (av.toLowerCase() === "true" ? 1 : 0) - (bv.toLowerCase() === "true" ? 1 : 0);
-      else r = av.localeCompare(bv, void 0, { numeric: true, sensitivity: "base" });
-      if (r !== 0) return s.dir === "asc" ? r : -r;
+  /** A pane stops full-text searching (unticked, collapsed or unloaded): drop note text no other pane needs. */
+  releaseBodies(st) {
+    if (!this.fullTextPanes.delete(st)) return;
+    if (!this.fullTextPanes.size) {
+      this.bodies.clear();
+      return;
     }
-    return a.file.path.localeCompare(b.file.path);
+    for (const path of this.bodies.keys()) {
+      if (![...this.fullTextPanes].some((p) => p.items.has(path))) this.bodies.delete(path);
+    }
   }
-  /**
-   * Sort, search and filter a pane. The DOM is only reordered when the sort or the set of notes changes;
-   * a search or filter change just toggles visibility on the cards whose visibility actually changed.
-   */
-  applyView(st) {
+  /** Sort keys are computed once per item and sort order; nodes are re-appended only if the order changed. */
+  sortItems(st) {
+    const forKey = JSON.stringify(st.config.sorts);
+    const sorts = st.config.sorts.map((s) => ({
+      dir: s.dir === "asc" ? 1 : -1,
+      t: this.typeOf(st, s.prop),
+      prop: s.prop
+    }));
     const all = [...st.items.values()];
-    const sortKey = JSON.stringify(st.config.sorts) + "|" + st.itemsVersion;
-    if (sortKey !== st.sortedKey) {
-      all.sort((a, b) => this.compareItems(st, a, b));
+    for (const it of all) {
+      if (it.sortFor === forKey && it.sortKeys) continue;
+      it.sortKeys = sorts.map(
+        (s) => this.getVals(it, s.prop).filter((x) => x !== "").join(", ")
+      );
+      it.sortFor = forKey;
+    }
+    const coll = this.collator;
+    all.sort((a, b) => {
+      for (let i = 0; i < sorts.length; i++) {
+        const av = a.sortKeys[i], bv = b.sortKeys[i], { t, dir } = sorts[i];
+        if (!av && !bv) continue;
+        if (!av) return 1;
+        if (!bv) return -1;
+        let r = 0;
+        if (t === "number") {
+          r = Number(av) - Number(bv);
+          if (isNaN(r)) r = 0;
+        } else if (t === "date") {
+          const x = av.slice(0, 16), y = bv.slice(0, 16);
+          r = x < y ? -1 : x > y ? 1 : 0;
+        } else if (t === "boolean") r = (av.toLowerCase() === "true" ? 1 : 0) - (bv.toLowerCase() === "true" ? 1 : 0);
+        else r = coll.compare(av, bv);
+        if (r !== 0) return r * dir;
+      }
+      return a.file.path < b.file.path ? -1 : a.file.path > b.file.path ? 1 : 0;
+    });
+    const same = all.length === st.order.length && all.every((it, i) => it === st.order[i]);
+    if (!same) {
       const frag = document.createDocumentFragment();
       for (const it of all) frag.appendChild(it.el);
       st.listEl.appendChild(frag);
-      st.sortedKey = sortKey;
     }
+    st.order = all;
+    st.needsSort = false;
+  }
+  /**
+   * Sort, search and filter a pane. The DOM is only reordered when the sort or the items changed;
+   * a search or filter change just toggles visibility on the cards whose visibility actually changed.
+   */
+  applyView(st) {
+    if (st.dead) return;
+    if (st.needsSort || st.order.length !== st.items.size || st.order[0]?.sortFor !== JSON.stringify(st.config.sorts)) {
+      this.sortItems(st);
+    }
+    const all = st.order;
     const q = st.search.trim();
     const tree = q ? parseSearch(q) : null;
     const id = ++st.searchId;
     if (tree && st.fullText) {
-      const missing = all.filter((it) => it.body === void 0);
+      this.fullTextPanes.add(st);
+      const missing = all.filter((it) => !this.bodies.has(it.file.path));
       if (missing.length) {
         st.countEl.setText(`Reading ${missing.length} notes\u2026`);
         void this.loadBodies(missing).then(() => {
-          if (id === st.searchId) this.showMatches(st, all, tree, q);
+          if (id === st.searchId && !st.dead) this.showMatches(st, all, tree, q);
         });
         return;
       }
@@ -1207,17 +1776,17 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     this.showMatches(st, all, tree, q);
   }
   showMatches(st, all, tree, q) {
-    var _a;
+    const pred = this.compileNode(st, st.config.filter);
     let shown = 0;
     for (const it of all) {
       let ok = true;
       if (tree) {
         if (it.hay === void 0) it.hay = this.hayOf(it);
         const hay = it.hay;
-        const body = st.fullText ? (_a = it.body) != null ? _a : "" : "";
+        const body = st.fullText ? this.bodies.get(it.file.path) ?? "" : "";
         ok = evalSearch(tree, (t) => hay.includes(t) || body !== "" && body.includes(t));
       }
-      if (ok) ok = this.evalNode(st, it, st.config.filter);
+      if (ok) ok = pred(it);
       if (ok) shown++;
       if (it.el.hasClass("bfv-hidden") === ok) it.el.toggleClass("bfv-hidden", !ok);
     }
@@ -1228,23 +1797,25 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     );
   }
   // ---------- cards ----------
-  createItem(st, src, sig, props, lists, tags) {
-    const { el, comp, setOpen } = this.buildCard(
+  createItem(st, src, ver) {
+    const { el, comp, setOpen, invalidate } = this.buildCard(
       st.listEl,
       src,
       st.component,
       st.opened,
       (path, open) => this.cardToggled(st, path, open)
     );
-    return { file: src, sig, el, comp, setOpen, props, lists, tags };
+    return { file: src, ver, el, comp, setOpen, invalidate, ...this.itemData(src) };
   }
   /** The user expanded or collapsed a card: update recency and persist the most recent MAX_OPEN_SAVED. */
   cardToggled(st, path, open) {
     st.openOrder = st.openOrder.filter((p) => p !== path);
     if (open) st.openOrder.push(path);
     if (st.items.size && !st.error) st.openOrder = st.openOrder.filter((p) => st.items.has(p));
-    st.config.open = st.openOrder.slice(-MAX_OPEN_SAVED).reverse();
-    this.persist(st);
+    const next = st.openOrder.slice(-MAX_OPEN_SAVED).reverse();
+    if (JSON.stringify(next) === JSON.stringify(st.config.open)) return;
+    st.config.open = next;
+    this.persist(st, true);
   }
   /** Frontmatter changed from outside: expand exactly the cards it lists. */
   syncOpen(st) {
@@ -1263,17 +1834,12 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   wireLinks(el) {
     const hoverParent = { hoverPopover: null };
     const linkOf = (evt) => {
-      var _a, _b;
-      const a = (_b = (_a = evt.target) == null ? void 0 : _a.closest) == null ? void 0 : _b.call(_a, "a.internal-link");
+      const a = evt.target?.closest?.("a.internal-link");
       return a && el.contains(a) ? a : null;
     };
-    const sourceOf = (a) => {
-      var _a, _b;
-      return (_b = (_a = a.closest("[data-bfv-path]")) == null ? void 0 : _a.getAttribute("data-bfv-path")) != null ? _b : "";
-    };
+    const sourceOf = (a) => a.closest("[data-bfv-path]")?.getAttribute("data-bfv-path") ?? "";
     const open = (evt, a, newLeaf) => {
-      var _a;
-      const href = (_a = a.getAttribute("data-href")) != null ? _a : a.getAttribute("href");
+      const href = a.getAttribute("data-href") ?? a.getAttribute("href");
       if (!href) return;
       evt.preventDefault();
       evt.stopPropagation();
@@ -1288,10 +1854,9 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       if (a && evt.button === 1) open(evt, a, "tab");
     });
     el.addEventListener("mouseover", (evt) => {
-      var _a;
       const a = linkOf(evt);
       if (!a) return;
-      const href = (_a = a.getAttribute("data-href")) != null ? _a : a.getAttribute("href");
+      const href = a.getAttribute("data-href") ?? a.getAttribute("href");
       if (!href) return;
       this.app.workspace.trigger("hover-link", {
         event: evt,
@@ -1305,7 +1870,8 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   }
   /**
    * A full-note collapsible card. It starts collapsed unless its path is in `opened`, and the note is only
-   * read and rendered when the card is first expanded, so large panes stay cheap.
+   * read and rendered when the card is first expanded, so large panes stay cheap. `invalidate()` re-renders
+   * an open card (debounced) or makes a collapsed one render afresh on its next expand.
    */
   buildCard(parentEl, src, parentComp, opened, onToggle) {
     const comp = new import_obsidian.Component();
@@ -1324,20 +1890,44 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     if (folder) ih.createSpan({ cls: "bfv-item-path", text: folder + "/" });
     const content = item.createDiv({ cls: "bfv-item-content markdown-rendered" });
     let rendered = false;
+    let isOpen = false;
+    let renderComp = null;
+    let seq = 0;
+    const render = async () => {
+      rendered = true;
+      const my = ++seq;
+      try {
+        const text = await this.app.vault.cachedRead(src);
+        if (my !== seq) return;
+        if (renderComp) comp.removeChild(renderComp);
+        renderComp = comp.addChild(new import_obsidian.Component());
+        content.empty();
+        this.renderProperties(content, src);
+        await import_obsidian.MarkdownRenderer.render(this.app, text, content, src.path, renderComp);
+      } catch (e) {
+        console.error("[backlinks-full-view] failed to render", src.path, e);
+        content.createDiv({ cls: "bfv-empty", text: "Couldn't render this note." });
+      }
+    };
+    const rerender = (0, import_obsidian.debounce)(
+      () => {
+        if (isOpen) void render();
+        else rendered = false;
+      },
+      CARD_RERENDER_DELAY,
+      true
+    );
+    comp.register(() => rerender.cancel());
+    const invalidate = () => {
+      if (!rendered) return;
+      if (isOpen) rerender();
+      else rendered = false;
+    };
     const setOpen = async (open) => {
+      isOpen = open;
       item.toggleClass("is-collapsed", !open);
       ichev.setText(open ? "\u25BE" : "\u25B8");
-      if (open && !rendered) {
-        rendered = true;
-        try {
-          const text = await this.app.vault.cachedRead(src);
-          this.renderProperties(content, src);
-          await import_obsidian.MarkdownRenderer.render(this.app, text, content, src.path, comp);
-        } catch (e) {
-          console.error("[backlinks-full-view] failed to render", src.path, e);
-          content.createDiv({ cls: "bfv-empty", text: "Couldn't render this note." });
-        }
-      }
+      if (open && !rendered) await render();
     };
     ih.addEventListener("click", (e) => {
       if (e.target.closest("a")) return;
@@ -1345,10 +1935,10 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       if (willOpen) opened.add(src.path);
       else opened.delete(src.path);
       void setOpen(willOpen);
-      onToggle == null ? void 0 : onToggle(src.path, willOpen);
+      onToggle?.(src.path, willOpen);
     });
     void setOpen(opened.has(src.path));
-    return { el: item, comp, setOpen };
+    return { el: item, comp, setOpen, invalidate };
   }
   /**
    * A compact, read-only properties table at the top of a card (MarkdownRenderer drops frontmatter).
@@ -1356,23 +1946,21 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
    * is pane config, not content, so it's left out.
    */
   renderProperties(el, src) {
-    var _a;
-    const fm = (_a = this.app.metadataCache.getFileCache(src)) == null ? void 0 : _a.frontmatter;
-    const keys = Object.keys(fm != null ? fm : {}).filter((k) => k !== "backlinks" && k !== "position");
+    const fm = this.app.metadataCache.getFileCache(src)?.frontmatter;
+    const keys = Object.keys(fm ?? {}).filter((k) => k !== "backlinks" && k !== "position");
     if (!fm || !keys.length) return;
     const table = el.createDiv({ cls: "bfv-props" });
     const LINK = /^\[\[([^\]|#]+)(#[^\]|]*)?(?:\|([^\]]*))?\]\]$/;
     const value = (cell, v, key) => {
-      var _a2, _b, _c, _d, _e;
       if (v === null || v === void 0 || v === "") return;
       if (typeof v === "string") {
         const m = v.match(LINK);
         if (m) {
-          const target = m[1] + ((_a2 = m[2]) != null ? _a2 : "");
+          const target = m[1] + (m[2] ?? "");
           const dest = this.app.metadataCache.getFirstLinkpathDest(m[1], src.path);
           cell.createEl("a", {
             cls: "internal-link" + (dest ? "" : " is-unresolved"),
-            text: (_e = m[3]) != null ? _e : ((_c = (_b = dest == null ? void 0 : dest.basename) != null ? _b : m[1].split("/").pop()) != null ? _c : m[1]) + ((_d = m[2]) != null ? _d : ""),
+            text: m[3] ?? (dest?.basename ?? m[1].split("/").pop() ?? m[1]) + (m[2] ?? ""),
             href: target,
             attr: { "data-href": target }
           });
@@ -1388,7 +1976,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       }
     };
     for (const k of keys) {
-      const row = table.createDiv({ cls: "bfv-prop" });
+      const row = table.createDiv({ cls: "bfv-prop-row" });
       row.createDiv({ cls: "bfv-prop-key", text: k });
       const cell = row.createDiv({ cls: "bfv-prop-value" });
       const v = fm[k];
