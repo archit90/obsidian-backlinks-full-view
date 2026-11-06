@@ -210,7 +210,11 @@ export function serializeEntry(e: Entry): Record<string, unknown> {
   const out: Record<string, unknown> = { ...e.raw };
   for (const [k, f] of KEYS) {
     if (k in e.raw && JSON.stringify(was[f]) === JSON.stringify(c[f])) continue;
-    if (vals[k] === null && !(k in e.raw)) continue;
+    if (vals[k] === null) {
+      // cleared: remove the key rather than writing `key: null`
+      delete out[k];
+      continue;
+    }
     out[k] = vals[k];
   }
   return out;

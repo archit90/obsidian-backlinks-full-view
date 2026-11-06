@@ -7,6 +7,7 @@ import {
   Plugin,
   TAbstractFile,
   TFile,
+  Debouncer,
   debounce,
 } from "obsidian";
 import {
@@ -40,6 +41,7 @@ import {
   OPEN_SAVE_DELAY,
   PANEL_CLASS,
   REFRESH_DELAY,
+  DV_DELAY,
   SKIP_SELECTOR,
 } from "./constants";
 import { notePathsInResult } from "./dataview";
@@ -66,7 +68,9 @@ export default class FullBacklinksPlugin extends Plugin {
   private bodies = new Map<string, string>(); // lower-cased note text for full-text search, shared by panes
   private fullTextPanes = new Set<PanelState>(); // panes whose full-text search holds bodies
   private collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-  private schedule: () => void = () => {};
+  private schedule: Debouncer<[], void> | null = null;
+  /** Dataview reindexes on every autosave: its query re-runs wait for a pause in typing. */
+  private dvSchedule: Debouncer<[], void> | null = null;
 
   override async onload() {
     // short global for DataviewJS:  bfv.embed(dv, dv.pages("#x"))
@@ -80,6 +84,15 @@ export default class FullBacklinksPlugin extends Plugin {
     for (const m of this.missingApis())
       this.warnOnce("api-" + m, `Obsidian API not available: ${m}. Some features are disabled.`);
     this.schedule = debounce(() => this.runRefresh(), REFRESH_DELAY, true);
+    this.dvSchedule = debounce(
+      () => {
+        this.dvEpoch++;
+        this.pendingDv = true;
+        this.schedule?.();
+      },
+      DV_DELAY,
+      true,
+    );
     this.ro = new ResizeObserver(entries => {
       for (const e of entries) {
         const view = this.roViews.get(e.target);
@@ -87,19 +100,19 @@ export default class FullBacklinksPlugin extends Plugin {
         const vs = this.views.get(view);
         if (!vs || vs.stale) {
           this.pendingViews.add(view);
-          this.schedule();
+          this.schedule?.();
         }
       }
     });
     const layout = () => {
       this.pendingLayout = true;
-      this.schedule();
+      this.schedule?.();
     };
     const touch = (path: string) => {
       this.versions.set(path, (this.versions.get(path) ?? 0) + 1);
       this.bodies.delete(path);
       this.pendingPaths.add(path);
-      this.schedule();
+      this.schedule?.();
     };
     this.registerEvent(this.app.workspace.on("layout-change", layout));
     this.registerEvent(this.app.workspace.on("file-open", layout));
@@ -111,13 +124,23 @@ export default class FullBacklinksPlugin extends Plugin {
           this.linksResolvedOnce = true;
           this.pendingAll = true;
         }
-        this.schedule(); // backlinks of pending paths are only final once links are resolved
+        this.schedule?.(); // backlinks of pending paths are only final once links are resolved
       }),
     );
     this.registerEvent(
       this.app.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
         if (!(file instanceof TFile)) return;
-        for (const vs of this.views.values()) if (vs.notePath === oldPath) vs.notePath = file.path; // same note, new path
+        for (const vs of this.views.values()) {
+          if (vs.notePath === oldPath) vs.notePath = file.path; // same note, new path
+          // an expanded card of the renamed note stays expanded, under its new path
+          for (const st of vs.panes) {
+            if (!st.opened.has(oldPath) && !st.config.open.includes(oldPath)) continue;
+            if (st.opened.delete(oldPath)) st.opened.add(file.path);
+            st.openOrder = st.openOrder.map(p => (p === oldPath ? file.path : p));
+            st.config.open = st.config.open.map(p => (p === oldPath ? file.path : p));
+            this.persist(st, true);
+          }
+        }
         touch(oldPath);
         touch(file.path);
       }),
@@ -130,13 +153,14 @@ export default class FullBacklinksPlugin extends Plugin {
     // Dataview signals (only fire when Dataview is installed)
     try {
       const mc = this.app.metadataCache;
-      const dvChanged = () => {
-        this.dvEpoch++;
-        this.pendingDv = true;
-        this.schedule();
-      };
-      this.registerEvent(mc.on("dataview:index-ready", dvChanged));
-      this.registerEvent(mc.on("dataview:metadata-change", dvChanged));
+      this.registerEvent(
+        mc.on("dataview:index-ready", () => {
+          this.dvEpoch++;
+          this.pendingDv = true;
+          this.schedule?.();
+        }),
+      );
+      this.registerEvent(mc.on("dataview:metadata-change", () => this.dvSchedule?.()));
     } catch (e) {
       this.warnOnce("dv-events", "Could not subscribe to Dataview events; query panes refresh on note changes only.");
     }
@@ -147,6 +171,9 @@ export default class FullBacklinksPlugin extends Plugin {
   }
 
   override onunload() {
+    // a refresh queued just before unload would put panels back into notes after they were removed
+    this.schedule?.cancel();
+    this.dvSchedule?.cancel();
     if (window.bfv === this.api) delete window.bfv;
     this.ro?.disconnect();
     for (const view of [...this.views.keys()]) this.destroyView(view); // flushes pending writes first
@@ -247,7 +274,13 @@ export default class FullBacklinksPlugin extends Plugin {
       }
       if (!view.containerEl.isShown()) {
         // refreshed by the ResizeObserver once it's shown again
-        if (vs && (all || paths.size || dv || vs.notePath !== view.file.path)) vs.stale = true;
+        // only when the change concerns it: a background tab of cards then needs no refresh on return
+        const hit =
+          all ||
+          vs?.notePath !== view.file.path ||
+          (paths.size > 0 && this.affects(vs, paths)) ||
+          (dv && vs.panes.some(p => !p.deferred && p.config.query.trim()));
+        if (vs && hit) vs.stale = true;
         return;
       }
       if (!vs || all || forced.has(view) || vs.stale || vs.notePath !== view.file.path) {
@@ -285,7 +318,9 @@ export default class FullBacklinksPlugin extends Plugin {
     const resolved = this.app.metadataCache.resolvedLinks;
     const out = new Map<string, TFile[]>();
     for (const t of targets) out.set(t, []);
-    const few = targets.size <= 8;
+    // checking each target per source only wins for one or two targets (measured: 8 targets took 3× the
+    // time of a full pass over each source's links)
+    const few = targets.size <= 2;
     for (const src in resolved) {
       const links = resolved[src];
       let f: TFile | null | undefined;
@@ -1704,9 +1739,16 @@ export default class FullBacklinksPlugin extends Plugin {
         content.createDiv({ cls: "bfv-empty", text: "Couldn't render this note." });
       }
     };
-    const rerender = debounce(
+    // while the source note is being typed in, its card waits: rendering a long note on every autosave
+    // stalls the editor (it catches up a moment after the editor loses focus)
+    const editingSource = () => {
+      const ed = this.app.workspace.activeEditor;
+      return ed?.file?.path === src.path && !!ed.editor?.hasFocus();
+    };
+    const rerender: Debouncer<[], void> = debounce(
       () => {
-        if (isOpen) void render();
+        if (isOpen && editingSource()) rerender();
+        else if (isOpen) void render();
         else rendered = false;
       },
       CARD_RERENDER_DELAY,

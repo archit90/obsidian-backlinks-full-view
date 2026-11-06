@@ -38,6 +38,7 @@ var MAX_OPEN_SAVED = 50;
 var CONFIG_SAVE_DELAY = 600;
 var OPEN_SAVE_DELAY = 5e3;
 var REFRESH_DELAY = 300;
+var DV_DELAY = 2500;
 var CARD_RERENDER_DELAY = 500;
 var SKIP_SELECTOR = "[data-bfv-skip]";
 
@@ -216,7 +217,10 @@ function serializeEntry(e) {
   const out = { ...e.raw };
   for (const [k, f] of KEYS) {
     if (k in e.raw && JSON.stringify(was[f]) === JSON.stringify(c[f])) continue;
-    if (vals[k] === null && !(k in e.raw)) continue;
+    if (vals[k] === null) {
+      delete out[k];
+      continue;
+    }
     out[k] = vals[k];
   }
   return out;
@@ -388,8 +392,9 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     this.fullTextPanes = /* @__PURE__ */ new Set();
     // panes whose full-text search holds bodies
     this.collator = new Intl.Collator(void 0, { numeric: true, sensitivity: "base" });
-    this.schedule = () => {
-    };
+    this.schedule = null;
+    /** Dataview reindexes on every autosave: its query re-runs wait for a pause in typing. */
+    this.dvSchedule = null;
     this.warned = /* @__PURE__ */ new Set();
     // ---------- public API (for DataviewJS) ----------
     //
@@ -452,6 +457,15 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     for (const m of this.missingApis())
       this.warnOnce("api-" + m, `Obsidian API not available: ${m}. Some features are disabled.`);
     this.schedule = (0, import_obsidian.debounce)(() => this.runRefresh(), REFRESH_DELAY, true);
+    this.dvSchedule = (0, import_obsidian.debounce)(
+      () => {
+        this.dvEpoch++;
+        this.pendingDv = true;
+        this.schedule?.();
+      },
+      DV_DELAY,
+      true
+    );
     this.ro = new ResizeObserver((entries) => {
       for (const e of entries) {
         const view = this.roViews.get(e.target);
@@ -459,19 +473,19 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         const vs = this.views.get(view);
         if (!vs || vs.stale) {
           this.pendingViews.add(view);
-          this.schedule();
+          this.schedule?.();
         }
       }
     });
     const layout = () => {
       this.pendingLayout = true;
-      this.schedule();
+      this.schedule?.();
     };
     const touch = (path) => {
       this.versions.set(path, (this.versions.get(path) ?? 0) + 1);
       this.bodies.delete(path);
       this.pendingPaths.add(path);
-      this.schedule();
+      this.schedule?.();
     };
     this.registerEvent(this.app.workspace.on("layout-change", layout));
     this.registerEvent(this.app.workspace.on("file-open", layout));
@@ -483,13 +497,22 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
           this.linksResolvedOnce = true;
           this.pendingAll = true;
         }
-        this.schedule();
+        this.schedule?.();
       })
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         if (!(file instanceof import_obsidian.TFile)) return;
-        for (const vs of this.views.values()) if (vs.notePath === oldPath) vs.notePath = file.path;
+        for (const vs of this.views.values()) {
+          if (vs.notePath === oldPath) vs.notePath = file.path;
+          for (const st of vs.panes) {
+            if (!st.opened.has(oldPath) && !st.config.open.includes(oldPath)) continue;
+            if (st.opened.delete(oldPath)) st.opened.add(file.path);
+            st.openOrder = st.openOrder.map((p) => p === oldPath ? file.path : p);
+            st.config.open = st.config.open.map((p) => p === oldPath ? file.path : p);
+            this.persist(st, true);
+          }
+        }
         touch(oldPath);
         touch(file.path);
       })
@@ -501,13 +524,14 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     );
     try {
       const mc = this.app.metadataCache;
-      const dvChanged = () => {
-        this.dvEpoch++;
-        this.pendingDv = true;
-        this.schedule();
-      };
-      this.registerEvent(mc.on("dataview:index-ready", dvChanged));
-      this.registerEvent(mc.on("dataview:metadata-change", dvChanged));
+      this.registerEvent(
+        mc.on("dataview:index-ready", () => {
+          this.dvEpoch++;
+          this.pendingDv = true;
+          this.schedule?.();
+        })
+      );
+      this.registerEvent(mc.on("dataview:metadata-change", () => this.dvSchedule?.()));
     } catch (e) {
       this.warnOnce("dv-events", "Could not subscribe to Dataview events; query panes refresh on note changes only.");
     }
@@ -517,6 +541,8 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     });
   }
   onunload() {
+    this.schedule?.cancel();
+    this.dvSchedule?.cancel();
     if (window.bfv === this.api) delete window.bfv;
     this.ro?.disconnect();
     for (const view of [...this.views.keys()]) this.destroyView(view);
@@ -602,7 +628,8 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         return;
       }
       if (!view.containerEl.isShown()) {
-        if (vs && (all || paths.size || dv || vs.notePath !== view.file.path)) vs.stale = true;
+        const hit = all || vs?.notePath !== view.file.path || paths.size > 0 && this.affects(vs, paths) || dv && vs.panes.some((p) => !p.deferred && p.config.query.trim());
+        if (vs && hit) vs.stale = true;
         return;
       }
       if (!vs || all || forced.has(view) || vs.stale || vs.notePath !== view.file.path) {
@@ -638,7 +665,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     const resolved = this.app.metadataCache.resolvedLinks;
     const out = /* @__PURE__ */ new Map();
     for (const t of targets) out.set(t, []);
-    const few = targets.size <= 8;
+    const few = targets.size <= 2;
     for (const src in resolved) {
       const links = resolved[src];
       let f;
@@ -1914,9 +1941,14 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         content.createDiv({ cls: "bfv-empty", text: "Couldn't render this note." });
       }
     };
+    const editingSource = () => {
+      const ed = this.app.workspace.activeEditor;
+      return ed?.file?.path === src.path && !!ed.editor?.hasFocus();
+    };
     const rerender = (0, import_obsidian.debounce)(
       () => {
-        if (isOpen) void render();
+        if (isOpen && editingSource()) rerender();
+        else if (isOpen) void render();
         else rendered = false;
       },
       CARD_RERENDER_DELAY,
