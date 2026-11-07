@@ -29,6 +29,11 @@ declare module "obsidian" {
     renderer?: { footer?: { el?: HTMLElement } };
   }
 
+  /** A canvas tab (core Canvas). Its note cards aren't leaves: each holds a markdown embed as `child`. */
+  interface View {
+    canvas?: { nodes?: Map<string, { child?: unknown }> };
+  }
+
   interface MarkdownView {
     /** Editing views: the panel goes at the end of the editor's sizer, after the last line. */
     editMode?: { sizerEl?: HTMLElement };

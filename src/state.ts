@@ -1,4 +1,19 @@
 import type { Component, MarkdownView, TFile, debounce } from "obsidian";
+
+/**
+ * The markdown embed inside a canvas note card (Obsidian internal, checked in 1.15.0). While the card is being
+ * edited, `editMode` is set and its editor (with `.cm-sizer`) runs inside a same-origin iframe that Obsidian
+ * relays the app's styles into; it's destroyed when editing stops.
+ */
+export interface CanvasEmbed extends Component {
+  file: TFile | null;
+  containerEl: HTMLElement;
+  previewMode: { renderer?: { footer?: { el?: HTMLElement } | null; addFooter?: () => void } };
+  editMode?: { sizerEl?: HTMLElement } | null;
+}
+
+/** Where panes are shown: a note tab, or a note card on a canvas. */
+export type NoteView = MarkdownView | CanvasEmbed;
 import type { Entry, PropDef, PropType, Settings } from "./config";
 
 // ---------- runtime state ----------
@@ -66,10 +81,11 @@ export interface PanelState {
 
 /** All backlinks panes shown under one note view. */
 export interface ViewState {
-  view: MarkdownView;
+  view: NoteView;
   el: HTMLElement;
   warnEl: HTMLElement; // note-level frontmatter problems
-  addBtn: HTMLElement;
+  addBtn: HTMLElement; // the actions row (+ Add backlinks pane, canvas toggle): always last, panes go before it
+  canvasBtn: HTMLElement; // "Enable in canvas" / "Disable in canvas"
   host: HTMLElement | null;
   panes: PanelState[]; // the note's own panes, saved in its `backlinks` frontmatter
   base: PanelState | null; // built-in pane every note gets (plain backlinks, starts collapsed, not saved)

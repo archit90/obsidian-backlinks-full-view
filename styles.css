@@ -153,7 +153,10 @@
 .view-content:has(> .markdown-reading-view > .markdown-preview-view.is-readable-line-width) > .bfv-container {
   max-width: var(--file-line-width);
 }
-.bfv-add {
+.bfv-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
   margin-top: 4px;
 }
 .bfv-remove {

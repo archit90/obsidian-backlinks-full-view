@@ -10,3 +10,5 @@ export const DV_DELAY = 2500; // ms of quiet after Dataview reindexes a note bef
 export const CARD_RERENDER_DELAY = 500; // ms debounce before an open card re-renders after its note changed
 /** A host element with this attribute opts the note views inside it out (Editor Lanes: backlinks panes off). */
 export const SKIP_SELECTOR = "[data-bfv-skip]";
+/** Frontmatter property that opts a note in to panes on its canvas cards (`true`); off by default. */
+export const CANVAS_OPT_IN = "canvas-full-backlinks-enabled";

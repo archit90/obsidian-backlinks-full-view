@@ -27,7 +27,7 @@ __export(main_exports, {
   default: () => FullBacklinksPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian = require("obsidian");
+var import_obsidian2 = require("obsidian");
 
 // src/constants.ts
 var PANEL_CLASS = "bfv-panel";
@@ -41,6 +41,7 @@ var REFRESH_DELAY = 300;
 var DV_DELAY = 2500;
 var CARD_RERENDER_DELAY = 500;
 var SKIP_SELECTOR = "[data-bfv-skip]";
+var CANVAS_OPT_IN = "canvas-full-backlinks-enabled";
 
 // src/values.ts
 function toStrings(v) {
@@ -275,6 +276,30 @@ function notePathsInResult(val) {
   return paths;
 }
 
+// src/settings.ts
+var import_obsidian = require("obsidian");
+var PLUGIN_DEFAULTS = {
+  canvas: true
+};
+var FullBacklinksSettingTab = class extends import_obsidian.PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    new import_obsidian.Setting(containerEl).setName("Show backlinks panes on canvas cards").setDesc(
+      'A note card on a canvas shows its panes while you edit it, and when not editing if the note has "Enable in canvas" (canvas-full-backlinks-enabled: true). Off: no panes on canvas cards, and the Enable in canvas button is hidden.'
+    ).addToggle(
+      (t) => t.setValue(this.plugin.settings.canvas).onChange(async (v) => {
+        this.plugin.settings.canvas = v;
+        await this.plugin.saveSettings();
+      })
+    );
+  }
+};
+
 // src/search.ts
 function parseSearch(q) {
   const toks = [];
@@ -364,9 +389,21 @@ function evalSearch(n, has) {
 }
 
 // src/main.ts
-var FullBacklinksPlugin = class extends import_obsidian.Plugin {
+function asCanvasEmbed(child) {
+  const c = child;
+  return c && c.file instanceof import_obsidian2.TFile && c.file.extension === "md" && c.previewMode?.renderer && c.containerEl instanceof HTMLElement && typeof c.register === "function" ? c : null;
+}
+function isEl(x) {
+  const n = x;
+  return !!n && (typeof n.instanceOf === "function" ? n.instanceOf(HTMLElement) : n instanceof HTMLElement);
+}
+function modeOf(view) {
+  return view instanceof import_obsidian2.MarkdownView ? view.getMode() : "canvas";
+}
+var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
   constructor() {
     super(...arguments);
+    this.settings = { ...PLUGIN_DEFAULTS };
     this.views = /* @__PURE__ */ new Map();
     this.observed = /* @__PURE__ */ new WeakSet();
     // views whose close tears down their state
@@ -395,6 +432,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     this.schedule = null;
     /** Dataview reindexes on every autosave: its query re-runs wait for a pause in typing. */
     this.dvSchedule = null;
+    this.watchedCanvases = /* @__PURE__ */ new WeakSet();
     this.warned = /* @__PURE__ */ new Set();
     // ---------- public API (for DataviewJS) ----------
     //
@@ -428,7 +466,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
           const path = typeof p === "string" ? p : p?.file?.path ?? p?.path;
           if (!path) continue;
           const f = this.app.vault.getAbstractFileByPath(path) ?? this.app.metadataCache.getFirstLinkpathDest(path, sourcePath);
-          if (!(f instanceof import_obsidian.TFile) || f.extension !== "md" || seen.has(f.path) || ancestors.has(f.path)) continue;
+          if (!(f instanceof import_obsidian2.TFile) || f.extension !== "md" || seen.has(f.path) || ancestors.has(f.path)) continue;
           seen.add(f.path);
           total++;
           if (total > limit) continue;
@@ -447,17 +485,19 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     };
   }
   async onload() {
+    this.settings = Object.assign({}, PLUGIN_DEFAULTS, await this.loadData());
+    this.addSettingTab(new FullBacklinksSettingTab(this.app, this));
     window.bfv = this.api;
     this.registerHoverLinkSource(HOVER_SOURCE, { display: "Backlinks Full View", defaultMod: true });
     this.addCommand({
       id: "diagnostics",
       name: "Show diagnostics",
-      callback: () => new import_obsidian.Notice(this.diagnostics().join("\n"), 12e3)
+      callback: () => new import_obsidian2.Notice(this.diagnostics().join("\n"), 12e3)
     });
     for (const m of this.missingApis())
       this.warnOnce("api-" + m, `Obsidian API not available: ${m}. Some features are disabled.`);
-    this.schedule = (0, import_obsidian.debounce)(() => this.runRefresh(), REFRESH_DELAY, true);
-    this.dvSchedule = (0, import_obsidian.debounce)(
+    this.schedule = (0, import_obsidian2.debounce)(() => this.runRefresh(), REFRESH_DELAY, true);
+    this.dvSchedule = (0, import_obsidian2.debounce)(
       () => {
         this.dvEpoch++;
         this.pendingDv = true;
@@ -502,7 +542,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
-        if (!(file instanceof import_obsidian.TFile)) return;
+        if (!(file instanceof import_obsidian2.TFile)) return;
         for (const vs of this.views.values()) {
           if (vs.notePath === oldPath) vs.notePath = file.path;
           for (const st of vs.panes) {
@@ -519,7 +559,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     );
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
-        if (file instanceof import_obsidian.TFile) touch(file.path);
+        if (file instanceof import_obsidian2.TFile) touch(file.path);
       })
     );
     try {
@@ -552,7 +592,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     const out = [];
     if (typeof this.app.fileManager?.processFrontMatter !== "function")
       out.push("FileManager.processFrontMatter (saving pane settings)");
-    if (typeof import_obsidian.MarkdownRenderer?.render !== "function") out.push("MarkdownRenderer.render (note rendering)");
+    if (typeof import_obsidian2.MarkdownRenderer?.render !== "function") out.push("MarkdownRenderer.render (note rendering)");
     return out;
   }
   diagnostics() {
@@ -563,7 +603,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     );
     const missing = this.missingApis();
     lines.push(missing.length ? "Missing Obsidian APIs: " + missing.join("; ") : "Obsidian APIs: ok");
-    const view = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+    const view = this.app.workspace.getActiveViewOfType(import_obsidian2.MarkdownView);
     if (view) {
       const host = this.getHost(view);
       lines.push(
@@ -614,16 +654,15 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     this.pendingViews = /* @__PURE__ */ new Set();
     this.queryCache.clear();
     const jobs = [];
-    this.app.workspace.iterateAllLeaves((leaf) => {
-      const view = leaf.view;
-      if (!(view instanceof import_obsidian.MarkdownView)) return;
+    const visit = (view) => {
       this.observeView(view);
       const vs = this.views.get(view);
       if (view.containerEl.closest(SKIP_SELECTOR)) {
         if (vs) this.destroyView(view);
         return;
       }
-      if (!view.file) {
+      const canvasOff = !(view instanceof import_obsidian2.MarkdownView) && !isEl(view.editMode?.sizerEl) && !!view.file && !this.canvasOptIn(view.file);
+      if (!view.file || canvasOff) {
         if (vs) this.destroyView(view);
         return;
       }
@@ -639,6 +678,24 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       if (layout) this.attach(vs, this.hostFor(view));
       if (paths.size && this.affects(vs, paths)) jobs.push({ view, needSources: true });
       else if (dv && vs.panes.some((p) => !p.deferred && p.config.query.trim())) jobs.push({ view, needSources: false });
+    };
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const view = leaf.view;
+      if (view instanceof import_obsidian2.MarkdownView) return visit(view);
+      const nodes = view.canvas?.nodes;
+      if (!nodes) return;
+      if (!this.settings.canvas) {
+        for (const node of nodes.values()) {
+          const embed = asCanvasEmbed(node.child);
+          if (embed && this.views.has(embed)) this.destroyView(embed);
+        }
+        return;
+      }
+      this.watchCanvas(view.containerEl);
+      for (const node of nodes.values()) {
+        const embed = asCanvasEmbed(node.child);
+        if (embed) visit(embed);
+      }
     });
     if (!jobs.length) return;
     const targets = new Set(jobs.filter((j) => j.needSources).map((j) => j.view.file.path));
@@ -650,6 +707,64 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         console.error("[backlinks-full-view] refresh failed for", j.view.file?.path, e);
       }
     }
+  }
+  async saveSettings() {
+    await this.saveData(this.settings);
+    for (const vs of this.views.values()) {
+      const f = vs.notePath ? this.app.vault.getAbstractFileByPath(vs.notePath) : null;
+      if (f instanceof import_obsidian2.TFile) this.updateCanvasBtn(vs, f);
+    }
+    this.pendingLayout = true;
+    this.schedule?.();
+  }
+  canvasOptIn(file) {
+    return this.app.metadataCache.getFileCache(file)?.frontmatter?.[CANVAS_OPT_IN] === true;
+  }
+  /** The "Enable in canvas" toggle writes CANVAS_OPT_IN; on, it reads "Disable in canvas". */
+  updateCanvasBtn(vs, file) {
+    vs.canvasBtn.toggleClass("bfv-hidden", !this.settings.canvas);
+    const on = this.canvasOptIn(file);
+    vs.canvasBtn.setText(on ? "Disable in canvas" : "Enable in canvas");
+    vs.canvasBtn.setAttr(
+      "aria-label",
+      on ? "Stop showing backlinks panes on this note's canvas cards" : "Show backlinks panes on this note's canvas cards too"
+    );
+  }
+  async setCanvasOptIn(file, on) {
+    if (typeof this.app.fileManager?.processFrontMatter !== "function") return;
+    try {
+      await this.app.fileManager.processFrontMatter(file, (fm) => {
+        if (on) fm[CANVAS_OPT_IN] = true;
+        else delete fm[CANVAS_OPT_IN];
+      });
+    } catch (e) {
+      console.error("[backlinks-full-view] couldn't set", CANVAS_OPT_IN, "on", file.path, e);
+      new import_obsidian2.Notice(`Couldn't update ${CANVAS_OPT_IN} in ${file.basename}.`);
+    }
+  }
+  /**
+   * Canvas cards mount and unmount their note as they scroll in and out of view, with no event for it: watch
+   * for a card's content being filled, and for its editor iframe being added or removed (editing starts or
+   * stops: the panes move between the editor and the reading view), and refresh then. Unmounting unloads the
+   * embed, which tears its panes down (observeView).
+   */
+  watchCanvas(el) {
+    if (this.watchedCanvases.has(el)) return;
+    this.watchedCanvases.add(el);
+    const mo = new MutationObserver((muts) => {
+      for (const m of muts) {
+        const t = m.target;
+        const filled = t instanceof HTMLElement && t.classList.contains("canvas-node-content") && m.addedNodes.length;
+        const iframe = [...m.addedNodes, ...m.removedNodes].some((n) => n.nodeName === "IFRAME");
+        if (filled || iframe) {
+          this.pendingLayout = true;
+          this.schedule?.();
+          return;
+        }
+      }
+    });
+    mo.observe(el, { childList: true, subtree: true });
+    this.register(() => mo.disconnect());
   }
   affects(vs, paths) {
     const resolved = this.app.metadataCache.resolvedLinks;
@@ -673,7 +788,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         if (t === src) return;
         if (f === void 0) {
           const a = this.app.vault.getAbstractFileByPath(src);
-          f = a instanceof import_obsidian.TFile && a.extension === "md" ? a : null;
+          f = a instanceof import_obsidian2.TFile && a.extension === "md" ? a : null;
         }
         if (f) out.get(t).push(f);
       };
@@ -694,6 +809,14 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
    * These are Obsidian internals (checked in 1.15.0); `view.contentEl` is the fallback.
    */
   getHost(view) {
+    if (!(view instanceof import_obsidian2.MarkdownView)) {
+      const sizer = view.editMode?.sizerEl;
+      if (isEl(sizer)) return sizer;
+      const r = view.previewMode?.renderer;
+      if (r && !r.footer) r.addFooter?.();
+      const f = r?.footer?.el;
+      return isEl(f) ? f : null;
+    }
     const el = view.getMode() === "preview" ? view.previewMode?.renderer?.footer?.el : view.editMode?.sizerEl;
     return el instanceof HTMLElement ? el : null;
   }
@@ -701,10 +824,10 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     const host = this.getHost(view);
     if (host) return host;
     this.warnOnce(
-      "host-" + view.getMode(),
-      `Could not find the ${view.getMode()} content container (Obsidian's internals may have changed); falling back to the view's content element.`
+      "host-" + modeOf(view),
+      `Could not find the ${modeOf(view)} content container (Obsidian's internals may have changed); falling back to the view's content element.`
     );
-    return view.contentEl;
+    return view instanceof import_obsidian2.MarkdownView ? view.contentEl : view.containerEl;
   }
   attach(vs, host) {
     if (vs.el.parentElement === host) return;
@@ -738,14 +861,18 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   }
   createViewState(view, host) {
     const el = host.createDiv({ cls: "bfv-container" });
+    if (!(view instanceof import_obsidian2.MarkdownView)) el.addClass("interactive-child");
     this.wireLinks(el);
     const warnEl = el.createDiv({ cls: "bfv-config-error bfv-hidden" });
-    const addBtn = el.createEl("button", { cls: "bfv-add", text: "+ Add backlinks pane" });
+    const actions = el.createDiv({ cls: "bfv-actions" });
+    const addBtn = actions.createEl("button", { cls: "bfv-add", text: "+ Add backlinks pane" });
+    const canvasBtn = actions.createEl("button", { cls: "bfv-canvas-toggle" });
     const vs = {
       view,
       el,
       warnEl,
-      addBtn,
+      addBtn: actions,
+      canvasBtn,
       host,
       panes: [],
       base: null,
@@ -758,8 +885,8 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       dirty: false,
       configPending: false,
       graceUntil: 0,
-      saveSoon: (0, import_obsidian.debounce)(() => this.flush(vs), CONFIG_SAVE_DELAY, true),
-      saveLater: (0, import_obsidian.debounce)(() => this.flush(vs), OPEN_SAVE_DELAY, true),
+      saveSoon: (0, import_obsidian2.debounce)(() => this.flush(vs), CONFIG_SAVE_DELAY, true),
+      saveLater: (0, import_obsidian2.debounce)(() => this.flush(vs), OPEN_SAVE_DELAY, true),
       sources: [],
       sourcePaths: /* @__PURE__ */ new Set(),
       srcSig: "",
@@ -775,6 +902,10 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       this.updateTitles(vs);
       pane.el.querySelector(".bfv-header")?.click();
       this.persist(pane);
+    });
+    canvasBtn.addEventListener("click", () => {
+      const f = vs.notePath ? this.app.vault.getAbstractFileByPath(vs.notePath) : null;
+      if (f instanceof import_obsidian2.TFile) void this.setCanvasOptIn(f, !this.canvasOptIn(f));
     });
     return vs;
   }
@@ -796,13 +927,13 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     vs.panes.splice(i, 1);
     this.updateTitles(vs);
     this.markDirty(vs);
-    const notice = new import_obsidian.Notice(
+    const notice = new import_obsidian2.Notice(
       createFragment((f) => {
         f.appendText(`Removed pane \u201C${title}\u201D. `);
         f.createEl("button", { text: "Undo" }).addEventListener("click", () => {
           notice.hide();
           if (vs.gen !== gen || vs.notePath !== notePath || !this.views.has(vs.view)) {
-            new import_obsidian.Notice("Can't undo: that note is no longer open in the same view.");
+            new import_obsidian2.Notice("Can't undo: that note is no longer open in the same view.");
             return;
           }
           const pane = this.createPanel(vs, cfg, { raw, src: null, errors: [] });
@@ -833,6 +964,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     }
     const switched = vs.notePath !== file.path;
     this.loadConfig(vs, file);
+    this.updateCanvasBtn(vs, file);
     if (switched || !vs.base) this.resetBase(vs);
     vs.el.appendChild(vs.addBtn);
     if (vs.el.children[1] !== vs.base.el) vs.warnEl.after(vs.base.el);
@@ -842,7 +974,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   /** Refresh one pane now (it was expanded, or its own config changed). */
   updatePane(st) {
     const f = st.view.notePath ? this.app.vault.getAbstractFileByPath(st.view.notePath) : null;
-    if (f instanceof import_obsidian.TFile) this.refreshPane(st, f, true);
+    if (f instanceof import_obsidian2.TFile) this.refreshPane(st, f, true);
   }
   refreshPane(st, file, force = false) {
     if (st.dead) return;
@@ -879,7 +1011,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     const files = [];
     for (const p of st.queryPaths ?? []) {
       const f = this.app.vault.getAbstractFileByPath(p);
-      if (f instanceof import_obsidian.TFile && f.extension === "md") files.push(f);
+      if (f instanceof import_obsidian2.TFile && f.extension === "md") files.push(f);
     }
     const sig = "Q|" + q + "|" + st.error + "|" + file.path + "|" + files.map((f) => f.path + ":" + this.verOf(f.path)).join(",");
     this.finishRefresh(st, files, sig);
@@ -906,7 +1038,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       const paths = notePathsInResult(res.value);
       const out = [...paths].filter((p) => {
         const f = this.app.vault.getAbstractFileByPath(p);
-        return f instanceof import_obsidian.TFile && f.extension === "md";
+        return f instanceof import_obsidian2.TFile && f.extension === "md";
       });
       return {
         paths: out,
@@ -948,7 +1080,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
   createPanel(vs, config, entry, ephemeral = false) {
     const el = vs.el.createDiv({ cls: PANEL_CLASS });
     vs.el.appendChild(vs.addBtn);
-    const component = new import_obsidian.Component();
+    const component = new import_obsidian2.Component();
     component.load();
     const header = el.createDiv({ cls: "bfv-header" });
     const chev = header.createSpan({ cls: "bfv-chevron" });
@@ -1079,7 +1211,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       sortPanel.toggleClass("bfv-hidden", !sortPanel.hasClass("bfv-hidden"));
       st.renderEditors();
     });
-    const onSearch = (0, import_obsidian.debounce)(
+    const onSearch = (0, import_obsidian2.debounce)(
       () => {
         if (!st.dead) {
           st.search = searchInput.value;
@@ -1095,7 +1227,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       if (!st.fullText) this.releaseBodies(st);
       this.applyView(st);
     });
-    const onQuery = (0, import_obsidian.debounce)(
+    const onQuery = (0, import_obsidian2.debounce)(
       () => {
         if (!st.dead) this.updatePane(st);
       },
@@ -1272,7 +1404,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     vs.dirty = false;
     const path = vs.notePath, gen = vs.gen;
     const file = path ? this.app.vault.getAbstractFileByPath(path) : null;
-    if (!(file instanceof import_obsidian.TFile)) return;
+    if (!(file instanceof import_obsidian2.TFile)) return;
     if (typeof this.app.fileManager?.processFrontMatter !== "function") return;
     if (this.hasErrors(vs)) return;
     const base = vs.baseList;
@@ -1330,7 +1462,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     }
     this.applyEntries(vs, entries, false);
     const f = this.app.vault.getAbstractFileByPath(vs.notePath ?? "");
-    if (f instanceof import_obsidian.TFile) for (const p of vs.panes) this.refreshPane(p, f);
+    if (f instanceof import_obsidian2.TFile) for (const p of vs.panes) this.refreshPane(p, f);
   }
   /** The property's inferred type (from the loaded notes), or the file property's type. */
   knownType(st, id) {
@@ -1435,7 +1567,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         placeholder: vt === "date" ? "YYYY-MM-DD, today, today-7d" : "Value"
       });
       input.value = rule.value;
-      const commit = (0, import_obsidian.debounce)(
+      const commit = (0, import_obsidian2.debounce)(
         () => {
           if (!st.dead) {
             st.updateButtons();
@@ -1879,7 +2011,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
     };
     el.addEventListener("click", (evt) => {
       const a = linkOf(evt);
-      if (a) open(evt, a, import_obsidian.Keymap.isModEvent(evt));
+      if (a) open(evt, a, import_obsidian2.Keymap.isModEvent(evt));
     });
     el.addEventListener("auxclick", (evt) => {
       const a = linkOf(evt);
@@ -1906,7 +2038,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
    * an open card (debounced) or makes a collapsed one render afresh on its next expand.
    */
   buildCard(parentEl, src, parentComp, opened, onToggle) {
-    const comp = new import_obsidian.Component();
+    const comp = new import_obsidian2.Component();
     parentComp.addChild(comp);
     const item = parentEl.createDiv({ cls: "bfv-item" });
     item.setAttr("data-bfv-path", src.path);
@@ -1932,10 +2064,10 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
         const text = await this.app.vault.cachedRead(src);
         if (my !== seq) return;
         if (renderComp) comp.removeChild(renderComp);
-        renderComp = comp.addChild(new import_obsidian.Component());
+        renderComp = comp.addChild(new import_obsidian2.Component());
         content.empty();
         this.renderProperties(content, src);
-        await import_obsidian.MarkdownRenderer.render(this.app, text, content, src.path, renderComp);
+        await import_obsidian2.MarkdownRenderer.render(this.app, text, content, src.path, renderComp);
       } catch (e) {
         console.error("[backlinks-full-view] failed to render", src.path, e);
         content.createDiv({ cls: "bfv-empty", text: "Couldn't render this note." });
@@ -1945,7 +2077,7 @@ var FullBacklinksPlugin = class extends import_obsidian.Plugin {
       const ed = this.app.workspace.activeEditor;
       return ed?.file?.path === src.path && !!ed.editor?.hasFocus();
     };
-    const rerender = (0, import_obsidian.debounce)(
+    const rerender = (0, import_obsidian2.debounce)(
       () => {
         if (isOpen && editingSource()) rerender();
         else if (isOpen) void render();

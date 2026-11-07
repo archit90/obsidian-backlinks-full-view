@@ -43,16 +43,42 @@ import {
   REFRESH_DELAY,
   DV_DELAY,
   SKIP_SELECTOR,
+  CANVAS_OPT_IN,
 } from "./constants";
 import { notePathsInResult } from "./dataview";
+import { FullBacklinksSettingTab, PLUGIN_DEFAULTS, PluginSettings } from "./settings";
 import { SearchNode, evalSearch, parseSearch } from "./search";
-import { ItemState, PanelState, Pred, QueryResult, ViewState } from "./state";
+import { CanvasEmbed, ItemState, NoteView, PanelState, Pred, QueryResult, ViewState } from "./state";
 import { DATE_RE, localIso, normDate, toStrings } from "./values";
 
+/** A canvas card's child, if it's a markdown note embed (duck-typed: the class isn't exported). */
+function asCanvasEmbed(child: unknown): CanvasEmbed | null {
+  const c = child as Partial<CanvasEmbed> | null | undefined;
+  return c &&
+    c.file instanceof TFile &&
+    c.file.extension === "md" &&
+    c.previewMode?.renderer &&
+    c.containerEl instanceof HTMLElement &&
+    typeof c.register === "function"
+    ? (c as CanvasEmbed)
+    : null;
+}
+
+/** `instanceof HTMLElement` that also holds for elements now living in another window (a canvas editor iframe). */
+function isEl(x: unknown): x is HTMLElement {
+  const n = x as Node | null | undefined;
+  return !!n && (typeof n.instanceOf === "function" ? n.instanceOf(HTMLElement) : n instanceof HTMLElement);
+}
+
+function modeOf(view: NoteView): string {
+  return view instanceof MarkdownView ? view.getMode() : "canvas";
+}
+
 export default class FullBacklinksPlugin extends Plugin {
-  private views = new Map<MarkdownView, ViewState>();
-  private observed = new WeakSet<MarkdownView>(); // views whose close tears down their state
-  private roViews = new WeakMap<Element, MarkdownView>();
+  override settings: PluginSettings = { ...PLUGIN_DEFAULTS };
+  private views = new Map<NoteView, ViewState>();
+  private observed = new WeakSet<NoteView>(); // views whose close tears down their state
+  private roViews = new WeakMap<Element, NoteView>();
   private ro: ResizeObserver | null = null; // notices a hidden view being shown again
   private linksResolvedOnce = false; // set by the first "resolved" event after the plugin loads
   /** Per-path change counter, bumped on every metadata change, rename or delete. Signatures use it. */
@@ -62,7 +88,7 @@ export default class FullBacklinksPlugin extends Plugin {
   private pendingAll = false;
   private pendingLayout = false;
   private pendingPaths = new Set<string>();
-  private pendingViews = new Set<MarkdownView>();
+  private pendingViews = new Set<NoteView>();
   private pendingDv = false;
   private queryCache = new Map<string, Promise<QueryResult>>(); // per refresh cycle
   private bodies = new Map<string, string>(); // lower-cased note text for full-text search, shared by panes
@@ -73,6 +99,8 @@ export default class FullBacklinksPlugin extends Plugin {
   private dvSchedule: Debouncer<[], void> | null = null;
 
   override async onload() {
+    this.settings = Object.assign({}, PLUGIN_DEFAULTS, await this.loadData());
+    this.addSettingTab(new FullBacklinksSettingTab(this.app, this));
     // short global for DataviewJS:  bfv.embed(dv, dv.pages("#x"))
     window.bfv = this.api;
     this.registerHoverLinkSource(HOVER_SOURCE, { display: "Backlinks Full View", defaultMod: true });
@@ -216,7 +244,7 @@ export default class FullBacklinksPlugin extends Plugin {
   }
 
   /** First sight of a view: tear its state down when it closes (BFV-01) and notice when it's shown again. */
-  private observeView(view: MarkdownView) {
+  private observeView(view: NoteView) {
     if (this.observed.has(view)) return;
     this.observed.add(view);
     this.roViews.set(view.containerEl, view);
@@ -227,7 +255,7 @@ export default class FullBacklinksPlugin extends Plugin {
     });
   }
 
-  private destroyView(view: MarkdownView) {
+  private destroyView(view: NoteView) {
     const vs = this.views.get(view);
     if (!vs) return;
     this.flush(vs); // writeConfig snapshots the panes synchronously, so this is safe before unloading them
@@ -256,10 +284,8 @@ export default class FullBacklinksPlugin extends Plugin {
     this.pendingViews = new Set();
     this.queryCache.clear();
 
-    const jobs: { view: MarkdownView; needSources: boolean }[] = [];
-    this.app.workspace.iterateAllLeaves(leaf => {
-      const view = leaf.view;
-      if (!(view instanceof MarkdownView)) return;
+    const jobs: { view: NoteView; needSources: boolean }[] = [];
+    const visit = (view: NoteView) => {
       this.observeView(view);
       const vs = this.views.get(view);
       // Opted out by its host: Editor Lanes sets data-bfv-skip on a lanes tab when "Show backlinks panes under lane
@@ -268,7 +294,11 @@ export default class FullBacklinksPlugin extends Plugin {
         if (vs) this.destroyView(view);
         return;
       }
-      if (!view.file) {
+      // canvas cards always show panes while being edited; in their reading view only when the note opts in
+      // (CANVAS_OPT_IN). Turning it off, or a card that stops editing, drops panes already built there.
+      const canvasOff =
+        !(view instanceof MarkdownView) && !isEl(view.editMode?.sizerEl) && !!view.file && !this.canvasOptIn(view.file);
+      if (!view.file || canvasOff) {
         if (vs) this.destroyView(view);
         return;
       }
@@ -290,6 +320,25 @@ export default class FullBacklinksPlugin extends Plugin {
       if (layout) this.attach(vs, this.hostFor(view));
       if (paths.size && this.affects(vs, paths)) jobs.push({ view, needSources: true });
       else if (dv && vs.panes.some(p => !p.deferred && p.config.query.trim())) jobs.push({ view, needSources: false });
+    };
+    this.app.workspace.iterateAllLeaves(leaf => {
+      const view = leaf.view;
+      if (view instanceof MarkdownView) return visit(view);
+      const nodes = view.canvas?.nodes;
+      if (!nodes) return;
+      if (!this.settings.canvas) {
+        // setting off: drop panes already built on this canvas's cards
+        for (const node of nodes.values()) {
+          const embed = asCanvasEmbed(node.child);
+          if (embed && this.views.has(embed)) this.destroyView(embed);
+        }
+        return;
+      }
+      this.watchCanvas(view.containerEl);
+      for (const node of nodes.values()) {
+        const embed = asCanvasEmbed(node.child);
+        if (embed) visit(embed);
+      }
     });
     if (!jobs.length) return;
     const targets = new Set(jobs.filter(j => j.needSources).map(j => j.view.file!.path));
@@ -301,6 +350,73 @@ export default class FullBacklinksPlugin extends Plugin {
         console.error("[backlinks-full-view] refresh failed for", j.view.file?.path, e);
       }
     }
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+    // canvas setting: build or drop canvas card panes, and show or hide the button everywhere
+    for (const vs of this.views.values()) {
+      const f = vs.notePath ? this.app.vault.getAbstractFileByPath(vs.notePath) : null;
+      if (f instanceof TFile) this.updateCanvasBtn(vs, f);
+    }
+    this.pendingLayout = true;
+    this.schedule?.();
+  }
+
+  private canvasOptIn(file: TFile): boolean {
+    return this.app.metadataCache.getFileCache(file)?.frontmatter?.[CANVAS_OPT_IN] === true;
+  }
+
+  /** The "Enable in canvas" toggle writes CANVAS_OPT_IN; on, it reads "Disable in canvas". */
+  private updateCanvasBtn(vs: ViewState, file: TFile) {
+    vs.canvasBtn.toggleClass("bfv-hidden", !this.settings.canvas);
+    const on = this.canvasOptIn(file);
+    vs.canvasBtn.setText(on ? "Disable in canvas" : "Enable in canvas");
+    vs.canvasBtn.setAttr(
+      "aria-label",
+      on
+        ? "Stop showing backlinks panes on this note's canvas cards"
+        : "Show backlinks panes on this note's canvas cards too",
+    );
+  }
+
+  private async setCanvasOptIn(file: TFile, on: boolean) {
+    if (typeof this.app.fileManager?.processFrontMatter !== "function") return;
+    try {
+      await this.app.fileManager.processFrontMatter(file, fm => {
+        if (on) fm[CANVAS_OPT_IN] = true;
+        else delete fm[CANVAS_OPT_IN];
+      });
+    } catch (e) {
+      console.error("[backlinks-full-view] couldn't set", CANVAS_OPT_IN, "on", file.path, e);
+      new Notice(`Couldn't update ${CANVAS_OPT_IN} in ${file.basename}.`);
+    }
+  }
+
+  private watchedCanvases = new WeakSet<HTMLElement>();
+  /**
+   * Canvas cards mount and unmount their note as they scroll in and out of view, with no event for it: watch
+   * for a card's content being filled, and for its editor iframe being added or removed (editing starts or
+   * stops: the panes move between the editor and the reading view), and refresh then. Unmounting unloads the
+   * embed, which tears its panes down (observeView).
+   */
+  private watchCanvas(el: HTMLElement) {
+    if (this.watchedCanvases.has(el)) return;
+    this.watchedCanvases.add(el);
+    const mo = new MutationObserver(muts => {
+      for (const m of muts) {
+        const t = m.target;
+        const filled = t instanceof HTMLElement && t.classList.contains("canvas-node-content") && m.addedNodes.length;
+        const iframe = [...m.addedNodes, ...m.removedNodes].some(n => n.nodeName === "IFRAME");
+        if (filled || iframe) {
+          this.pendingLayout = true;
+          this.schedule?.();
+          return;
+        }
+      }
+    });
+    mo.observe(el, { childList: true, subtree: true });
+    this.register(() => mo.disconnect());
   }
 
   private affects(vs: ViewState, paths: Set<string>): boolean {
@@ -350,20 +466,30 @@ export default class FullBacklinksPlugin extends Plugin {
    * - Editing modes: the editor's `.cm-sizer`, so the panes scroll with the note.
    * These are Obsidian internals (checked in 1.15.0); `view.contentEl` is the fallback.
    */
-  private getHost(view: MarkdownView): HTMLElement | null {
+  private getHost(view: NoteView): HTMLElement | null {
+    if (!(view instanceof MarkdownView)) {
+      // canvas card being edited: the end of its editor, inside the editor iframe
+      const sizer = view.editMode?.sizerEl;
+      if (isEl(sizer)) return sizer;
+      // otherwise its reading view, which has no footer section by default: add one (core Reading view does too)
+      const r = view.previewMode?.renderer;
+      if (r && !r.footer) r.addFooter?.();
+      const f = r?.footer?.el;
+      return isEl(f) ? f : null;
+    }
     const el = view.getMode() === "preview" ? view.previewMode?.renderer?.footer?.el : view.editMode?.sizerEl;
     return el instanceof HTMLElement ? el : null;
   }
 
-  private hostFor(view: MarkdownView): HTMLElement {
+  private hostFor(view: NoteView): HTMLElement {
     const host = this.getHost(view);
     if (host) return host;
     this.warnOnce(
-      "host-" + view.getMode(),
-      `Could not find the ${view.getMode()} content container (Obsidian's internals may have changed); ` +
+      "host-" + modeOf(view),
+      `Could not find the ${modeOf(view)} content container (Obsidian's internals may have changed); ` +
         "falling back to the view's content element.",
     );
-    return view.contentEl;
+    return view instanceof MarkdownView ? view.contentEl : view.containerEl;
   }
 
   private attach(vs: ViewState, host: HTMLElement) {
@@ -401,16 +527,21 @@ export default class FullBacklinksPlugin extends Plugin {
     vs.observer.observe(host, { childList: true });
   }
 
-  private createViewState(view: MarkdownView, host: HTMLElement): ViewState {
+  private createViewState(view: NoteView, host: HTMLElement): ViewState {
     const el = host.createDiv({ cls: "bfv-container" });
+    // canvas: Obsidian doesn't start editing a card on clicks inside .interactive-child
+    if (!(view instanceof MarkdownView)) el.addClass("interactive-child");
     this.wireLinks(el);
     const warnEl = el.createDiv({ cls: "bfv-config-error bfv-hidden" });
-    const addBtn = el.createEl("button", { cls: "bfv-add", text: "+ Add backlinks pane" });
+    const actions = el.createDiv({ cls: "bfv-actions" });
+    const addBtn = actions.createEl("button", { cls: "bfv-add", text: "+ Add backlinks pane" });
+    const canvasBtn = actions.createEl("button", { cls: "bfv-canvas-toggle" });
     const vs: ViewState = {
       view,
       el,
       warnEl,
-      addBtn,
+      addBtn: actions,
+      canvasBtn,
       host,
       panes: [],
       base: null,
@@ -440,6 +571,10 @@ export default class FullBacklinksPlugin extends Plugin {
       this.updateTitles(vs);
       (pane.el.querySelector(".bfv-header") as HTMLElement | null)?.click(); // a pane just added starts expanded
       this.persist(pane);
+    });
+    canvasBtn.addEventListener("click", () => {
+      const f = vs.notePath ? this.app.vault.getAbstractFileByPath(vs.notePath) : null;
+      if (f instanceof TFile) void this.setCanvasOptIn(f, !this.canvasOptIn(f));
     });
     return vs;
   }
@@ -487,7 +622,7 @@ export default class FullBacklinksPlugin extends Plugin {
     );
   }
 
-  private refreshView(view: MarkdownView, sources: TFile[] | null) {
+  private refreshView(view: NoteView, sources: TFile[] | null) {
     const file = view.file!;
     const host = this.hostFor(view);
     let vs = this.views.get(view);
@@ -505,6 +640,7 @@ export default class FullBacklinksPlugin extends Plugin {
     }
     const switched = vs.notePath !== file.path;
     this.loadConfig(vs, file);
+    this.updateCanvasBtn(vs, file);
     if (switched || !vs.base) this.resetBase(vs);
     vs.el.appendChild(vs.addBtn);
     if (vs.el.children[1] !== vs.base!.el) vs.warnEl.after(vs.base!.el); // always the first pane
