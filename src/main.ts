@@ -1,6 +1,10 @@
 import {
   Component,
+  EmbedComponent,
+  EmbedContext,
+  HoverParent,
   Keymap,
+  MarkdownEditModeInternal,
   MarkdownRenderer,
   MarkdownView,
   Notice,
@@ -24,6 +28,7 @@ import {
   Settings,
   SortRule,
   clone,
+  countRules,
   defaults,
   dirLabels,
   listJson,
@@ -45,10 +50,11 @@ import {
   SKIP_SELECTOR,
   CANVAS_OPT_IN,
 } from "./constants";
-import { notePathsInResult } from "./dataview";
+import { notePathsInResult, resultRowCount } from "./dataview";
+import { around } from "monkey-around";
 import { FullBacklinksSettingTab, PLUGIN_DEFAULTS, PluginSettings } from "./settings";
 import { SearchNode, evalSearch, parseSearch } from "./search";
-import { CanvasEmbed, ItemState, NoteView, PanelState, Pred, QueryResult, ViewState } from "./state";
+import { CanvasEmbed, ItemData, ItemState, NoteView, PanelState, Pred, QueryResult, Typed, ViewState } from "./state";
 import { DATE_RE, localIso, normDate, toStrings } from "./values";
 
 /** A canvas card's child, if it's a markdown note embed (duck-typed: the class isn't exported). */
@@ -58,10 +64,38 @@ function asCanvasEmbed(child: unknown): CanvasEmbed | null {
     c.file instanceof TFile &&
     c.file.extension === "md" &&
     c.previewMode?.renderer &&
-    c.containerEl instanceof HTMLElement &&
+    isEl(c.containerEl) &&
     typeof c.register === "function"
     ? (c as CanvasEmbed)
     : null;
+}
+
+/** What `bfv.embed` renders into: a DataviewJS `dv` object (its container, component and note), or an element. */
+type EmbedTarget = HTMLElement | { container: HTMLElement; component?: Component; currentFilePath?: string };
+interface EmbedOptions {
+  collapsed?: boolean;
+  sourcePath?: string;
+  limit?: number;
+}
+
+/** `bfv.embed`'s pages: an array, a Dataview DataArray (`.values`), or any iterable; else nothing. */
+function pageList(pages: unknown): unknown[] {
+  if (Array.isArray(pages)) return pages;
+  if (pages && typeof pages === "object") {
+    const values = (pages as { values?: unknown }).values;
+    if (Array.isArray(values)) return values;
+    if (Symbol.iterator in pages) return Array.from(pages as Iterable<unknown>);
+  }
+  return [];
+}
+
+/** A page's path: a string, a Dataview page (`file.path`) or a link (`path`). */
+function pagePath(p: unknown): string | undefined {
+  if (typeof p === "string") return p;
+  if (!p || typeof p !== "object") return undefined;
+  const { file, path } = p as { file?: { path?: unknown }; path?: unknown };
+  const fp = file && typeof file === "object" ? file.path : undefined;
+  return typeof fp === "string" ? fp : typeof path === "string" ? path : undefined;
 }
 
 /** `instanceof HTMLElement` that also holds for elements now living in another window (a canvas editor iframe). */
@@ -72,6 +106,30 @@ function isEl(x: unknown): x is HTMLElement {
 
 function modeOf(view: NoteView): string {
   return view instanceof MarkdownView ? view.getMode() : "canvas";
+}
+
+/** Space between a note's last line and its panes in Live Preview and Source mode: one empty text line.
+ * The fallback is for an editor that hasn't measured its lines yet. */
+const FALLBACK_LINE_PX = 24;
+
+/** An inline `![[note]]` embed shown as the panes' collapsible card (see `patchNoteEmbeds`). */
+class NoteEmbedCard extends Component implements EmbedComponent {
+  constructor(
+    private plugin: FullBacklinksPlugin,
+    private ctx: EmbedContext,
+    readonly file: TFile,
+  ) {
+    super();
+  }
+  get containerEl() {
+    return this.ctx.containerEl;
+  }
+  private built = false;
+  loadFile() {
+    if (this.built) return;
+    this.built = true;
+    this.plugin.buildEmbedCard(this.ctx, this.file, this);
+  }
 }
 
 export default class FullBacklinksPlugin extends Plugin {
@@ -104,6 +162,7 @@ export default class FullBacklinksPlugin extends Plugin {
     // short global for DataviewJS:  bfv.embed(dv, dv.pages("#x"))
     window.bfv = this.api;
     this.registerHoverLinkSource(HOVER_SOURCE, { display: "Backlinks Full View", defaultMod: true });
+    this.patchNoteEmbeds();
     this.addCommand({
       id: "diagnostics",
       name: "Show diagnostics",
@@ -192,6 +251,7 @@ export default class FullBacklinksPlugin extends Plugin {
     } catch (e) {
       this.warnOnce("dv-events", "Could not subscribe to Dataview events; query panes refresh on note changes only.");
     }
+    this.patchSetMode();
     this.app.workspace.onLayoutReady(() => {
       this.pendingAll = true;
       this.runRefresh();
@@ -243,10 +303,73 @@ export default class FullBacklinksPlugin extends Plugin {
     return lines;
   }
 
+  /** Mode switches made with `view.setMode` (scripts, other plugins) fire no event: move the panes then too. */
+  private patchSetMode() {
+    const plugin = this;
+    this.register(
+      around(MarkdownView.prototype, {
+        setMode: next =>
+          async function (this: MarkdownView, mode: unknown) {
+            await next?.call(this, mode);
+            plugin.pendingViews.add(this);
+            plugin.schedule?.();
+          },
+      }),
+    );
+  }
+
+  private editModeProtos = new WeakSet<object>();
+  /**
+   * Obsidian leaves half the editor's height of padding below a note's last line, so in a short note the
+   * panes (after that padding) sat half a screen down. The panes follow the text by one empty line instead, the
+   * rest of that padding going below them (as core Backlinks in the note does). The edit mode's class isn't exported: patch it on first sight.
+   */
+  private patchEditMode(view: MarkdownView) {
+    const em = view.editMode;
+    if (!em) return;
+    const proto = Object.getPrototypeOf(em) as MarkdownEditModeInternal;
+    if (this.editModeProtos.has(proto) || typeof proto.updateBottomPadding !== "function") return;
+    this.editModeProtos.add(proto);
+    const plugin = this;
+    this.register(
+      around(proto, {
+        updateBottomPadding: next =>
+          function (this: MarkdownEditModeInternal, height: number) {
+            next?.call(this, height);
+            plugin.fitBottomPadding(this, height);
+          },
+      }),
+    );
+  }
+
+  private fitBottomPadding(em: MarkdownEditModeInternal, height: number) {
+    const el = em.sizerEl?.querySelector<HTMLElement>(":scope > .bfv-container");
+    const content = em.cm?.contentDOM;
+    if (!el || !content) return;
+    el.style.minHeight = "";
+    if (em.view?.backlinksEl?.isShown()) return; // core Backlinks has the space
+    // a host that forces its own padding (Editor Lanes cards: none) keeps it, and gets no extra space
+    if (content.win.getComputedStyle(content).paddingBottom !== content.style.paddingBottom) return;
+    // one empty line from the text to the panes: the panes' own top margin plus the padding
+    const gap = Math.round(em.cm?.defaultLineHeight || FALLBACK_LINE_PX);
+    const margin = parseFloat(el.win.getComputedStyle(el).marginTop) || 0;
+    content.style.paddingBottom = Math.max(0, gap - margin) + "px";
+    el.style.minHeight = Math.max(0, height / 2 - gap) + "px";
+  }
+
+  /** Re-run Obsidian's bottom padding for a note view's editor, after the panes moved in or out of it. */
+  private refitBottomPadding(view: NoteView) {
+    if (!(view instanceof MarkdownView)) return;
+    const em = view.editMode;
+    const c = em?.containerEl;
+    if (em?.updateBottomPadding && c?.offsetParent) em.updateBottomPadding(c.clientHeight);
+  }
+
   /** First sight of a view: tear its state down when it closes (BFV-01) and notice when it's shown again. */
   private observeView(view: NoteView) {
     if (this.observed.has(view)) return;
     this.observed.add(view);
+    if (view instanceof MarkdownView) this.patchEditMode(view);
     this.roViews.set(view.containerEl, view);
     this.ro?.observe(view.containerEl);
     view.register(() => {
@@ -264,6 +387,7 @@ export default class FullBacklinksPlugin extends Plugin {
     vs.base?.component.unload();
     vs.el.remove();
     this.views.delete(view);
+    this.refitBottomPadding(view);
   }
 
   // ---------- refresh scheduling ----------
@@ -406,7 +530,7 @@ export default class FullBacklinksPlugin extends Plugin {
     const mo = new MutationObserver(muts => {
       for (const m of muts) {
         const t = m.target;
-        const filled = t instanceof HTMLElement && t.classList.contains("canvas-node-content") && m.addedNodes.length;
+        const filled = isEl(t) && t.classList.contains("canvas-node-content") && m.addedNodes.length;
         const iframe = [...m.addedNodes, ...m.removedNodes].some(n => n.nodeName === "IFRAME");
         if (filled || iframe) {
           this.pendingLayout = true;
@@ -478,7 +602,7 @@ export default class FullBacklinksPlugin extends Plugin {
       return isEl(f) ? f : null;
     }
     const el = view.getMode() === "preview" ? view.previewMode?.renderer?.footer?.el : view.editMode?.sizerEl;
-    return el instanceof HTMLElement ? el : null;
+    return isEl(el) ? el : null; // a popout window's elements aren't this window's HTMLElements
   }
 
   private hostFor(view: NoteView): HTMLElement {
@@ -497,6 +621,8 @@ export default class FullBacklinksPlugin extends Plugin {
     host.appendChild(vs.el);
     vs.host = host;
     this.watchHost(vs, host);
+    vs.el.style.minHeight = "";
+    this.refitBottomPadding(vs.view);
   }
 
   private warned = new Set<string>();
@@ -629,6 +755,7 @@ export default class FullBacklinksPlugin extends Plugin {
     if (!vs) {
       vs = this.createViewState(view, host);
       this.views.set(view, vs);
+      this.refitBottomPadding(view);
     } else this.attach(vs, host);
     vs.stale = false;
 
@@ -661,12 +788,12 @@ export default class FullBacklinksPlugin extends Plugin {
     const q = st.config.query.trim();
     // collapsed and never expanded: show the backlink count only (a query pane's count needs the query run)
     if (st.deferred) {
-      st.countEl.setText(q ? "" : String(vs.sources.length));
+      st.countEl.setText(q ? "" : this.collapsedCount(st, vs.sources));
       return;
     }
     if (st.collapsed && !force) {
       st.stale = true;
-      if (!q && !st.search.trim() && !this.countRules(st.config.filter)) st.countEl.setText(String(vs.sources.length));
+      if (!q && !st.search.trim()) st.countEl.setText(this.collapsedCount(st, vs.sources));
       return;
     }
     st.stale = false;
@@ -724,9 +851,11 @@ export default class FullBacklinksPlugin extends Plugin {
         const f = this.app.vault.getAbstractFileByPath(p);
         return f instanceof TFile && f.extension === "md";
       });
+      // no rows is a plain empty result; rows without a single note link are a query that can't fill a pane
+      const hint = !out.length && resultRowCount(res.value) > 0;
       return {
         paths: out,
-        error: out.length ? undefined : "The query returned no note links (use LIST or TABLE with file.link).",
+        error: hint ? "The query returned no note links (use LIST or TABLE with file.link)." : undefined,
       };
     } catch (e) {
       return { paths: [], error: "Dataview: " + String((e as Error)?.message ?? e) };
@@ -871,7 +1000,7 @@ export default class FullBacklinksPlugin extends Plugin {
         if (!sortPanel.hasClass("bfv-hidden")) this.renderSortEditor(st);
       },
       updateButtons: () => {
-        const nf = this.countRules(st.config.filter);
+        const nf = countRules(st.config.filter);
         const ns = st.config.sorts.length;
         filterBtn.setText("Filter" + (nf ? ` · ${nf}` : ""));
         sortBtn.setText("Sort" + (ns ? ` · ${ns}` : ""));
@@ -1195,16 +1324,16 @@ export default class FullBacklinksPlugin extends Plugin {
   }
 
   /** The property's inferred type (from the loaded notes), or the file property's type. */
-  private knownType(st: PanelState, id: string): PropType | undefined {
+  private knownType(st: Typed, id: string): PropType | undefined {
     return st.types.get(id) ?? FILE_PROPS.find(p => p.id === id)?.type;
   }
 
-  private typeOf(st: PanelState, id: string): PropType {
+  private typeOf(st: Typed, id: string): PropType {
     return this.knownType(st, id) ?? "text";
   }
 
   /** The type a rule is evaluated as: the property's type if the operator fits it, else the operator's own. */
-  private evalType(st: PanelState, r: Rule): PropType {
+  private evalType(st: Typed, r: Rule): PropType {
     const t = this.knownType(st, r.prop);
     if (t && OPS[t].includes(r.op)) return t;
     return OP_TYPE_ORDER.find(x => OPS[x].includes(r.op)) ?? t ?? "text";
@@ -1367,10 +1496,6 @@ export default class FullBacklinksPlugin extends Plugin {
     });
   }
 
-  private countRules(g: Group): number {
-    return g.children.reduce((n, c) => n + (c.type === "group" ? this.countRules(c) : 1), 0);
-  }
-
   // ---------- data sync ----------
 
   private itemData(src: TFile) {
@@ -1432,11 +1557,23 @@ export default class FullBacklinksPlugin extends Plugin {
 
   /** Property list and type inference for the filter/sort editors, in one pass over the items. */
   private buildCatalogue(st: PanelState) {
+    const { defs, types } = this.inferProps(st.items.values());
+    st.types = types;
+    st.propDefs = defs;
+    const key = defs.map(d => d.id + ":" + d.type).join(",");
+    if (key !== st.propDefsKey) {
+      st.propDefsKey = key;
+      st.renderEditors();
+    }
+  }
+
+  /** The note properties of `items`, each with its type inferred from the values (file properties first). */
+  private inferProps(items: Iterable<ItemData>): { defs: PropDef[]; types: Map<string, PropType> } {
     const stats = new Map<
       string,
       { label: string; list: boolean; any: boolean; bool: boolean; num: boolean; date: boolean }
     >();
-    for (const it of st.items.values()) {
+    for (const it of items) {
       for (const lk in it.props) {
         let s = stats.get(lk);
         if (!s) {
@@ -1455,7 +1592,7 @@ export default class FullBacklinksPlugin extends Plugin {
       }
     }
     const defs: PropDef[] = [...FILE_PROPS];
-    st.types = new Map(FILE_PROPS.map(p => [p.id, p.type]));
+    const types = new Map<string, PropType>(FILE_PROPS.map(p => [p.id, p.type]));
     for (const [lk, s] of [...stats].sort((a, b) => a[1].label.localeCompare(b[1].label))) {
       const type: PropType = s.list
         ? "list"
@@ -1469,19 +1606,25 @@ export default class FullBacklinksPlugin extends Plugin {
                 ? "date"
                 : "text";
       defs.push({ id: "note." + lk, label: s.label, type, group: "note" });
-      st.types.set("note." + lk, type);
+      types.set("note." + lk, type);
     }
-    st.propDefs = defs;
-    const key = defs.map(d => d.id + ":" + d.type).join(",");
-    if (key !== st.propDefsKey) {
-      st.propDefsKey = key;
-      st.renderEditors();
-    }
+    return { defs, types };
+  }
+
+  /**
+   * A collapsed pane's count: its backlinks, or "matching / all" when it has filter rules (worked out from
+   * metadata only, as expanding would show it before any search).
+   */
+  private collapsedCount(st: PanelState, sources: TFile[]): string {
+    if (!countRules(st.config.filter)) return String(sources.length);
+    const items: ItemData[] = sources.map(file => ({ file, ...this.itemData(file) }));
+    const pred = this.compileNode(this.inferProps(items), st.config.filter);
+    return `${items.filter(pred).length} / ${items.length}`;
   }
 
   // ---------- evaluation ----------
 
-  private getVals(it: ItemState, id: string): string[] {
+  private getVals(it: ItemData, id: string): string[] {
     const f = it.file;
     switch (id) {
       case "file.name":
@@ -1505,8 +1648,8 @@ export default class FullBacklinksPlugin extends Plugin {
   }
 
   /** A rule as a predicate, with its type, operator and target value worked out once. */
-  private compileRule(st: PanelState, r: Rule): Pred {
-    const present = (it: ItemState) => this.getVals(it, r.prop).filter(v => v !== "");
+  private compileRule(st: Typed, r: Rule): Pred {
+    const present = (it: ItemData) => this.getVals(it, r.prop).filter(v => v !== "");
     switch (r.op) {
       case "is empty":
         return it => present(it).length === 0;
@@ -1569,7 +1712,7 @@ export default class FullBacklinksPlugin extends Plugin {
         return true;
       };
     }
-    const lower = (it: ItemState) => present(it).map(x => x.toLowerCase());
+    const lower = (it: ItemData) => present(it).map(x => x.toLowerCase());
     if (type === "list") {
       const w = v.replace(/^#/, "");
       const neg = op === "does not contain";
@@ -1596,7 +1739,7 @@ export default class FullBacklinksPlugin extends Plugin {
     return () => true;
   }
 
-  private compileNode(st: PanelState, n: FilterNode): Pred {
+  private compileNode(st: Typed, n: FilterNode): Pred {
     if (n.type === "rule") return this.compileRule(st, n);
     if (!n.children.length) return () => true;
     const cs = n.children.map(c => this.compileNode(st, c));
@@ -1736,7 +1879,7 @@ export default class FullBacklinksPlugin extends Plugin {
       if (ok) shown++;
       if (it.el.hasClass("bfv-hidden") === ok) it.el.toggleClass("bfv-hidden", !ok);
     }
-    const filtered = q !== "" || this.countRules(st.config.filter) > 0;
+    const filtered = q !== "" || countRules(st.config.filter) > 0;
     st.countEl.setText(filtered ? `${shown} / ${all.length}` : String(all.length));
     st.emptyEl.setText(
       st.error
@@ -1788,7 +1931,7 @@ export default class FullBacklinksPlugin extends Plugin {
    * panel lives outside it (in .cm-sizer), so links rendered in cards would otherwise do nothing.
    */
   private wireLinks(el: HTMLElement) {
-    const hoverParent = { hoverPopover: null as any };
+    const hoverParent: HoverParent = { hoverPopover: null };
     const linkOf = (evt: Event) => {
       const a = (evt.target as HTMLElement | null)?.closest?.("a.internal-link") as HTMLElement | null;
       return a && el.contains(a) ? a : null;
@@ -1814,6 +1957,8 @@ export default class FullBacklinksPlugin extends Plugin {
       if (!a) return;
       const href = a.getAttribute("data-href") ?? a.getAttribute("href");
       if (!href) return;
+      // ours alone: in Reading view the note's own handler would also preview it, without Ctrl
+      evt.stopPropagation();
       this.app.workspace.trigger("hover-link", {
         event: evt,
         source: HOVER_SOURCE,
@@ -1851,7 +1996,8 @@ export default class FullBacklinksPlugin extends Plugin {
       attr: { "data-href": src.path },
     });
     const folder = src.parent && src.parent.path !== "/" ? src.parent.path : "";
-    if (folder) ih.createSpan({ cls: "bfv-item-path", text: folder + "/" });
+    // drawn right-to-left (a long folder is cut from the left): the LRMs keep a leading `_` or `.` in place
+    if (folder) ih.createSpan({ cls: "bfv-item-path", text: `\u200E${folder}/\u200E` });
 
     const content = item.createDiv({ cls: "bfv-item-content markdown-rendered" });
 
@@ -1966,6 +2112,84 @@ export default class FullBacklinksPlugin extends Plugin {
     }
   }
 
+  // ---------- `![[note]]` embeds as cards ----------
+
+  /** Expanded embed cards per note that holds them, for this session (a Live Preview redraw keeps them open). */
+  private embedOpen = new Map<string, Set<string>>();
+
+  /**
+   * Wraps Obsidian's Markdown embed creator: an inline whole-note embed of a note (not a heading / block
+   * subpath, not a canvas file card, not an Excalidraw drawing) becomes the panes' card, collapsed at first.
+   * Everything else, and everything while the setting is off, stays Obsidian's.
+   */
+  private patchNoteEmbeds() {
+    const registry = this.app.embedRegistry?.embedByExtension;
+    if (!registry || typeof registry.md !== "function") {
+      this.warnOnce("api-embedRegistry", "Obsidian API not available: embedRegistry. Embedded notes stay Obsidian's.");
+      return;
+    }
+    const plugin = this;
+    this.register(
+      around(registry, {
+        md: next =>
+          function (this: unknown, ctx: EmbedContext, file: TFile, subpath: string): EmbedComponent {
+            const card = plugin.cardEmbedFor(ctx, file, subpath);
+            return card ?? next!.call(this, ctx, file, subpath);
+          },
+      }),
+    );
+    this.rerenderNoteEmbeds();
+    // on unload, once the patch is off (unload order isn't guaranteed): Obsidian's embeds come back
+    this.register(() => window.setTimeout(() => this.rerenderNoteEmbeds(), 0));
+  }
+
+  private cardEmbedFor(ctx: EmbedContext, file: TFile, subpath: string): EmbedComponent | null {
+    // `showInline` marks a `![[…]]` embed in note text (also inside a rendered card); canvas file cards and
+    // hover previews leave it unset
+    if (!this.settings.noteEmbeds || !ctx.showInline || subpath || file.extension !== "md") return null;
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (fm && "excalidraw-plugin" in fm) return null; // a drawing: Excalidraw renders it
+    // a note embedding itself, or a card already showing this note above: Obsidian's own recursion guard
+    if (file.path === ctx.sourcePath || ctx.containerEl.closest(`[data-bfv-path="${CSS.escape(file.path)}"]`))
+      return null;
+    if ((ctx.depth ?? 0) > MAX_EMBED_DEPTH) return null;
+    return new NoteEmbedCard(this, ctx, file);
+  }
+
+  /** Builds the card for a `NoteEmbedCard` (kept here: it shares the panes' card and link handling). */
+  buildEmbedCard(ctx: EmbedContext, file: TFile, owner: Component) {
+    const el = ctx.containerEl;
+    el.empty();
+    el.removeClass("markdown-embed", "inline-embed");
+    el.addClass("bfv-note-embed");
+    this.wireLinks(el);
+    let opened = this.embedOpen.get(ctx.sourcePath);
+    if (!opened) this.embedOpen.set(ctx.sourcePath, (opened = new Set()));
+    const card = this.buildCard(el, file, owner, opened);
+    // the panes re-render a card when its note changes; an embed card does the same
+    owner.registerEvent(
+      this.app.vault.on("modify", f => {
+        if (f.path === file.path) card.invalidate();
+      }),
+    );
+    owner.registerEvent(
+      this.app.metadataCache.on("changed", f => {
+        if (f.path === file.path) card.invalidate();
+      }),
+    );
+    return card;
+  }
+
+  /** Redraws every open note so embeds follow the setting (and Obsidian's come back on unload). */
+  rerenderNoteEmbeds() {
+    this.app.workspace.iterateAllLeaves(leaf => {
+      const v = leaf.view;
+      if (!(v instanceof MarkdownView)) return;
+      if (v.getMode() === "preview") v.previewMode.rerender(true);
+      else leaf.rebuildView?.();
+    });
+  }
+
   // ---------- public API (for DataviewJS) ----------
   //
   //   bfv.embed(dv, dv.pages('#project'));                    // full, collapsible notes
@@ -1973,19 +2197,11 @@ export default class FullBacklinksPlugin extends Plugin {
   //   (bfv is a global alias of app.plugins.plugins["obsidian-backlinks-full-view"].api)
 
   api = {
-    embed: (
-      target: any,
-      pages: any,
-      opts: { collapsed?: boolean; sourcePath?: string; limit?: number } = {},
-    ): HTMLElement => {
-      const container: HTMLElement = target instanceof HTMLElement ? target : target.container;
-      const parentComp: Component = target?.component ?? this;
-      const sourcePath: string = opts.sourcePath ?? target?.currentFilePath ?? "";
-      const arr: any[] = Array.isArray(pages)
-        ? pages
-        : Array.isArray(pages?.values)
-          ? pages.values
-          : Array.from(pages ?? []);
+    embed: (target: EmbedTarget, pages: unknown, opts: EmbedOptions = {}): HTMLElement => {
+      const container: HTMLElement = isEl(target) ? target : target.container;
+      const parentComp: Component = (!isEl(target) && target.component) || this;
+      const sourcePath: string = opts.sourcePath ?? (isEl(target) ? undefined : target.currentFilePath) ?? "";
+      const arr = pageList(pages);
 
       const wrap = container.createDiv({ cls: "bfv-embeds" });
       this.wireLinks(wrap);
@@ -2013,7 +2229,7 @@ export default class FullBacklinksPlugin extends Plugin {
       const opened = new Set<string>();
       const seen = new Set<string>();
       for (const p of arr) {
-        const path: string | undefined = typeof p === "string" ? p : (p?.file?.path ?? p?.path);
+        const path = pagePath(p);
         if (!path) continue;
         const f =
           this.app.vault.getAbstractFileByPath(path) ?? this.app.metadataCache.getFirstLinkpathDest(path, sourcePath);

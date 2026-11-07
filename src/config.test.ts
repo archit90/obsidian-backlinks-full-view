@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { Entry, defaults, listJson, merge, parseEntry, parseList, sanitizeGroup, serializeEntry } from "./config";
+import {
+  Entry,
+  countRules,
+  defaults,
+  listJson,
+  merge,
+  parseEntry,
+  parseList,
+  sanitizeGroup,
+  serializeEntry,
+} from "./config";
 import { MAX_OPEN_SAVED } from "./constants";
 
 const entry = (raw: Record<string, unknown> | null, src: number | null = 0): Entry => ({ ...parseEntry(raw), src });
@@ -89,7 +99,19 @@ describe("sanitizeGroup", () => {
 describe("serializeEntry", () => {
   it("writes only non-default keys for a new pane", () => {
     const e: Entry = { cfg: { ...defaults(), title: "Logs" }, raw: null, errors: [], src: null };
-    expect(serializeEntry(e)).toEqual({ title: "Logs", filter: null, sort: null, query: null, open: null });
+    expect(serializeEntry(e)).toEqual({ title: "Logs" });
+  });
+  it("writes a new pane with nothing set as an empty entry, never `key: null`", () => {
+    const e: Entry = { cfg: defaults(), raw: null, errors: [], src: null };
+    expect(serializeEntry(e)).toEqual({});
+  });
+  it("removes a filter that has no rules left, whatever its groups' modes", () => {
+    const e = entry({
+      title: "T",
+      filter: '{"type":"group","mode":"and","children":[{"type":"rule","prop":"a","op":"is","value":"1"}]}',
+    });
+    e.cfg.filter = { type: "group", mode: "or", children: [{ type: "group", mode: "not", children: [] }] };
+    expect(serializeEntry(e)).toEqual({ title: "T" });
   });
   it("keeps unknown keys and the user's spelling of unchanged keys", () => {
     const raw = { title: "Logs", sort: [{ prop: "file.name" }], color: "red" };
@@ -144,5 +166,33 @@ describe("merge (three-way, per key)", () => {
   });
   it("listJson ignores raw spelling", () => {
     expect(listJson([entry({ sort: [{ prop: "file.name" }] })])).toBe(listJson([entry({})]));
+  });
+});
+
+describe("countRules", () => {
+  it("counts rules in nested groups, not groups", () => {
+    expect(countRules({ type: "group", mode: "and", children: [] })).toBe(0);
+    expect(
+      countRules({
+        type: "group",
+        mode: "or",
+        children: [
+          { type: "rule", prop: "a", op: "is", value: "" },
+          { type: "group", mode: "not", children: [{ type: "rule", prop: "b", op: "is", value: "" }] },
+          { type: "group", mode: "and", children: [] },
+        ],
+      }),
+    ).toBe(2);
+  });
+});
+
+describe("sort and filter values that aren't objects", () => {
+  it("rejects a sort list holding a non-object", () => {
+    expect(parseEntry({ sort: [{ prop: "a" }, "b"] }).errors).toEqual(["`sort` isn't a list of sort rules"]);
+  });
+  it("rejects a filter group whose child isn't an object, or with an unknown mode", () => {
+    expect(sanitizeGroup({ children: [3] })).toBeNull();
+    expect(sanitizeGroup({ mode: "xor", children: [] })).toBeNull();
+    expect(sanitizeGroup({ children: [] })).toEqual({ type: "group", mode: "and", children: [] });
   });
 });

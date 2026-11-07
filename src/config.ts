@@ -127,8 +127,9 @@ export function parseEntry(e: unknown): Omit<Entry, "src"> {
   }
   const sv = jsonField(r.sort, "sort", errors);
   if (sv !== undefined) {
-    if (Array.isArray(sv) && sv.every((x: any) => x && typeof x.prop === "string")) {
-      cfg.sorts = sv.map((x: any): SortRule => ({ prop: x.prop, dir: x.dir === "desc" ? "desc" : "asc" }));
+    const isRule = (x: unknown): x is { prop: string; dir?: unknown } => isPlainObject(x) && typeof x.prop === "string";
+    if (Array.isArray(sv) && sv.every(isRule)) {
+      cfg.sorts = sv.map((x): SortRule => ({ prop: x.prop, dir: x.dir === "desc" ? "desc" : "asc" }));
     } else errors.push("`sort` isn't a list of sort rules");
   }
   if (typeof r.query === "string") cfg.query = r.query.trim();
@@ -146,24 +147,35 @@ export function parseEntry(e: unknown): Omit<Entry, "src"> {
 }
 
 /** null if `x` (or anything inside it) isn't a valid filter group, so nothing is silently dropped. */
-export function sanitizeGroup(x: any): Group | null {
-  if (!x || typeof x !== "object" || !Array.isArray(x.children)) return null;
-  if (x.mode !== undefined && x.mode !== "and" && x.mode !== "or" && x.mode !== "not") return null;
+export function sanitizeGroup(x: unknown): Group | null {
+  if (!isPlainObject(x) || !Array.isArray(x.children)) return null;
+  const mode = x.mode ?? "and";
+  if (mode !== "and" && mode !== "or" && mode !== "not") return null;
   const children: FilterNode[] = [];
-  for (const c of x.children) {
-    if (Array.isArray(c?.children)) {
+  for (const c of x.children as unknown[]) {
+    if (isPlainObject(c) && Array.isArray(c.children)) {
       const g = sanitizeGroup(c);
       if (!g) return null;
       children.push(g);
-    } else if (typeof c?.prop === "string" && typeof c?.op === "string") {
+    } else if (isPlainObject(c) && typeof c.prop === "string" && typeof c.op === "string") {
       children.push({ type: "rule", prop: c.prop, op: c.op, value: String(c.value ?? "") });
     } else return null;
   }
-  return { type: "group", mode: x.mode ?? "and", children };
+  return { type: "group", mode, children };
+}
+
+/** Number of rules in a filter group, nested groups included. */
+export function countRules(g: Group): number {
+  return g.children.reduce((n, c) => n + (c.type === "group" ? countRules(c) : 1), 0);
 }
 
 export function listJson(entries: Entry[]): string {
   return JSON.stringify(entries.map(e => [e.cfg, e.errors]));
+}
+
+/** `to[f] = clone(from[f])` for one Settings field, keeping the field's own type. */
+function copyField<K extends keyof Settings>(to: Settings, from: Settings, f: K) {
+  to[f] = clone(from[f]);
 }
 
 /**
@@ -185,7 +197,7 @@ export function merge(base: Entry[], ours: Entry[], disk: Entry[]): Entry[] {
         b = base[i];
       if (!o || !b) return d;
       const cfg = clone(d.cfg);
-      for (const [, f] of KEYS) if (!same(o.cfg[f], b.cfg[f])) (cfg as any)[f] = clone(o.cfg[f]);
+      for (const [, f] of KEYS) if (!same(o.cfg[f], b.cfg[f])) copyField(cfg, o.cfg, f);
       return { cfg, raw: d.raw, errors: [], src: i };
     });
   }
@@ -200,12 +212,13 @@ export function serializeEntry(e: Entry): Record<string, unknown> {
   const c = e.cfg;
   const vals: Record<string, unknown> = {
     title: c.title || null,
-    filter: JSON.stringify(c.filter) === JSON.stringify(def.filter) ? null : JSON.stringify(c.filter),
+    // a filter without a single rule filters nothing, whatever its groups' modes: cleared
+    filter: countRules(c.filter) === 0 ? null : JSON.stringify(c.filter),
     sort: JSON.stringify(c.sorts) === JSON.stringify(def.sorts) ? null : JSON.stringify(c.sorts),
     query: c.query || null,
     open: c.open.length ? [...c.open] : null,
   };
-  if (!e.raw) return vals; // a new pane: every key, as before
+  if (!e.raw) return Object.fromEntries(Object.entries(vals).filter(([, v]) => v !== null)); // a new pane: set keys only
   const was = parseEntry(e.raw).cfg;
   const out: Record<string, unknown> = { ...e.raw };
   for (const [k, f] of KEYS) {

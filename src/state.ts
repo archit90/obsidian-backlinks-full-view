@@ -109,7 +109,13 @@ export interface ViewState {
   reattachSince: number;
 }
 
-export type Pred = (it: ItemState) => boolean;
+/** What filters and search read of a card's note (an item, or a lightweight stand-in for a collapsed pane's count). */
+export type ItemData = Pick<ItemState, "file" | "props" | "labels" | "lists" | "tags">;
+/** Property types a filter is evaluated with. */
+export interface Typed {
+  types: Map<string, PropType>;
+}
+export type Pred = (it: ItemData) => boolean;
 export interface QueryResult {
   paths: string[];
   error?: string;

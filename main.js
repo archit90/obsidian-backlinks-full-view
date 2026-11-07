@@ -147,7 +147,8 @@ function parseEntry(e) {
   }
   const sv = jsonField(r.sort, "sort", errors);
   if (sv !== void 0) {
-    if (Array.isArray(sv) && sv.every((x) => x && typeof x.prop === "string")) {
+    const isRule = (x) => isPlainObject(x) && typeof x.prop === "string";
+    if (Array.isArray(sv) && sv.every(isRule)) {
       cfg.sorts = sv.map((x) => ({ prop: x.prop, dir: x.dir === "desc" ? "desc" : "asc" }));
     } else errors.push("`sort` isn't a list of sort rules");
   }
@@ -165,22 +166,29 @@ function parseEntry(e) {
   return { cfg, raw: r, errors };
 }
 function sanitizeGroup(x) {
-  if (!x || typeof x !== "object" || !Array.isArray(x.children)) return null;
-  if (x.mode !== void 0 && x.mode !== "and" && x.mode !== "or" && x.mode !== "not") return null;
+  if (!isPlainObject(x) || !Array.isArray(x.children)) return null;
+  const mode = x.mode ?? "and";
+  if (mode !== "and" && mode !== "or" && mode !== "not") return null;
   const children = [];
   for (const c of x.children) {
-    if (Array.isArray(c?.children)) {
+    if (isPlainObject(c) && Array.isArray(c.children)) {
       const g = sanitizeGroup(c);
       if (!g) return null;
       children.push(g);
-    } else if (typeof c?.prop === "string" && typeof c?.op === "string") {
+    } else if (isPlainObject(c) && typeof c.prop === "string" && typeof c.op === "string") {
       children.push({ type: "rule", prop: c.prop, op: c.op, value: String(c.value ?? "") });
     } else return null;
   }
-  return { type: "group", mode: x.mode ?? "and", children };
+  return { type: "group", mode, children };
+}
+function countRules(g) {
+  return g.children.reduce((n, c) => n + (c.type === "group" ? countRules(c) : 1), 0);
 }
 function listJson(entries) {
   return JSON.stringify(entries.map((e) => [e.cfg, e.errors]));
+}
+function copyField(to, from, f) {
+  to[f] = clone(from[f]);
 }
 function merge(base, ours, disk) {
   const fromDisk = (o) => {
@@ -195,7 +203,7 @@ function merge(base, ours, disk) {
       const o = ours[i], b = base[i];
       if (!o || !b) return d;
       const cfg = clone(d.cfg);
-      for (const [, f] of KEYS) if (!same(o.cfg[f], b.cfg[f])) cfg[f] = clone(o.cfg[f]);
+      for (const [, f] of KEYS) if (!same(o.cfg[f], b.cfg[f])) copyField(cfg, o.cfg, f);
       return { cfg, raw: d.raw, errors: [], src: i };
     });
   }
@@ -208,12 +216,13 @@ function serializeEntry(e) {
   const c = e.cfg;
   const vals = {
     title: c.title || null,
-    filter: JSON.stringify(c.filter) === JSON.stringify(def.filter) ? null : JSON.stringify(c.filter),
+    // a filter without a single rule filters nothing, whatever its groups' modes: cleared
+    filter: countRules(c.filter) === 0 ? null : JSON.stringify(c.filter),
     sort: JSON.stringify(c.sorts) === JSON.stringify(def.sorts) ? null : JSON.stringify(c.sorts),
     query: c.query || null,
     open: c.open.length ? [...c.open] : null
   };
-  if (!e.raw) return vals;
+  if (!e.raw) return Object.fromEntries(Object.entries(vals).filter(([, v]) => v !== null));
   const was = parseEntry(e.raw).cfg;
   const out = { ...e.raw };
   for (const [k, f] of KEYS) {
@@ -228,15 +237,21 @@ function serializeEntry(e) {
 }
 
 // src/dataview.ts
+var isObj = (v) => typeof v === "object" && v !== null;
+var valuesOf = (v) => isObj(v) && Array.isArray(v.values) ? v.values : [];
+var meaning = (v, key) => {
+  const m = v[key];
+  return isObj(m) ? m.type : void 0;
+};
 function notePathsInResult(val) {
   const paths = /* @__PURE__ */ new Set();
   const walk = (v, depth) => {
-    if (v == null || depth > 5 || typeof v !== "object") return;
+    if (!isObj(v) || depth > 5) return;
     if (typeof v.path === "string") {
       paths.add(v.path);
       return;
     }
-    if (typeof v.file?.path === "string") {
+    if (isObj(v.file) && typeof v.file.path === "string") {
       paths.add(v.file.path);
       return;
     }
@@ -250,17 +265,18 @@ function notePathsInResult(val) {
     }
     if (Object.getPrototypeOf(v) === Object.prototype) for (const x of Object.values(v)) walk(x, depth + 1);
   };
-  const values = Array.isArray(val?.values) ? val.values : [];
-  switch (val?.type) {
+  const values = valuesOf(val);
+  const type = isObj(val) ? val.type : void 0;
+  switch (type) {
     case "table": {
-      const grouped = val.idMeaning?.type === "group";
+      const grouped = isObj(val) && meaning(val, "idMeaning") === "group";
       for (const row of values) walk(grouped ? row : Array.isArray(row) ? row[0] : row, 0);
       break;
     }
     case "list": {
-      const grouped = val.primaryMeaning?.type === "group";
+      const grouped = isObj(val) && meaning(val, "primaryMeaning") === "group";
       for (const x of values) {
-        if (x?.$widget === "dataview:list-pair") {
+        if (isObj(x) && x.$widget === "dataview:list-pair") {
           walk(x.key, 0);
           if (grouped) walk(x.value, 0);
         } else walk(x, 0);
@@ -268,18 +284,58 @@ function notePathsInResult(val) {
       break;
     }
     case "calendar":
-      for (const x of values) walk(x?.link, 0);
+      for (const x of values) walk(isObj(x) ? x.link : void 0, 0);
       break;
     default:
-      walk(val?.values ?? val, 0);
+      walk(isObj(val) ? val.values ?? val : val, 0);
   }
   return paths;
+}
+function resultRowCount(val) {
+  return valuesOf(val).length;
+}
+
+// ../node_modules/monkey-around/dist/index.mjs
+function around(obj, factories) {
+  const removers = Object.keys(factories).map((key) => around1(obj, key, factories[key]));
+  return removers.length === 1 ? removers[0] : function() {
+    removers.forEach((r) => r());
+  };
+}
+function around1(obj, method, createWrapper) {
+  const inherited = obj[method], hadOwn = obj.hasOwnProperty(method), original = hadOwn ? inherited : function() {
+    return Object.getPrototypeOf(obj)[method].apply(this, arguments);
+  };
+  let current = createWrapper(original);
+  if (inherited)
+    Object.setPrototypeOf(current, inherited);
+  Object.setPrototypeOf(wrapper, current);
+  obj[method] = wrapper;
+  return remove;
+  function wrapper(...args) {
+    if (current === original && obj[method] === wrapper)
+      remove();
+    return current.apply(this, args);
+  }
+  function remove() {
+    if (obj[method] === wrapper) {
+      if (hadOwn)
+        obj[method] = original;
+      else
+        delete obj[method];
+    }
+    if (current === original)
+      return;
+    current = original;
+    Object.setPrototypeOf(wrapper, inherited || Function);
+  }
 }
 
 // src/settings.ts
 var import_obsidian = require("obsidian");
 var PLUGIN_DEFAULTS = {
-  canvas: true
+  canvas: true,
+  noteEmbeds: true
 };
 var FullBacklinksSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
@@ -295,6 +351,15 @@ var FullBacklinksSettingTab = class extends import_obsidian.PluginSettingTab {
       (t) => t.setValue(this.plugin.settings.canvas).onChange(async (v) => {
         this.plugin.settings.canvas = v;
         await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Show embedded notes as cards").setDesc(
+      "A whole-note embed (![[note]]) renders as a collapsible card, as in the panes: collapsed at first, with the note's properties and the card border. Embeds of a heading or block (![[note#\u2026]]) stay Obsidian's."
+    ).addToggle(
+      (t) => t.setValue(this.plugin.settings.noteEmbeds).onChange(async (v) => {
+        this.plugin.settings.noteEmbeds = v;
+        await this.plugin.saveSettings();
+        this.plugin.rerenderNoteEmbeds();
       })
     );
   }
@@ -391,7 +456,23 @@ function evalSearch(n, has) {
 // src/main.ts
 function asCanvasEmbed(child) {
   const c = child;
-  return c && c.file instanceof import_obsidian2.TFile && c.file.extension === "md" && c.previewMode?.renderer && c.containerEl instanceof HTMLElement && typeof c.register === "function" ? c : null;
+  return c && c.file instanceof import_obsidian2.TFile && c.file.extension === "md" && c.previewMode?.renderer && isEl(c.containerEl) && typeof c.register === "function" ? c : null;
+}
+function pageList(pages) {
+  if (Array.isArray(pages)) return pages;
+  if (pages && typeof pages === "object") {
+    const values = pages.values;
+    if (Array.isArray(values)) return values;
+    if (Symbol.iterator in pages) return Array.from(pages);
+  }
+  return [];
+}
+function pagePath(p) {
+  if (typeof p === "string") return p;
+  if (!p || typeof p !== "object") return void 0;
+  const { file, path } = p;
+  const fp = file && typeof file === "object" ? file.path : void 0;
+  return typeof fp === "string" ? fp : typeof path === "string" ? path : void 0;
 }
 function isEl(x) {
   const n = x;
@@ -400,6 +481,24 @@ function isEl(x) {
 function modeOf(view) {
   return view instanceof import_obsidian2.MarkdownView ? view.getMode() : "canvas";
 }
+var FALLBACK_LINE_PX = 24;
+var NoteEmbedCard = class extends import_obsidian2.Component {
+  constructor(plugin, ctx, file) {
+    super();
+    this.plugin = plugin;
+    this.ctx = ctx;
+    this.file = file;
+    this.built = false;
+  }
+  get containerEl() {
+    return this.ctx.containerEl;
+  }
+  loadFile() {
+    if (this.built) return;
+    this.built = true;
+    this.plugin.buildEmbedCard(this.ctx, this.file, this);
+  }
+};
 var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
   constructor() {
     super(...arguments);
@@ -432,8 +531,12 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     this.schedule = null;
     /** Dataview reindexes on every autosave: its query re-runs wait for a pause in typing. */
     this.dvSchedule = null;
+    this.editModeProtos = /* @__PURE__ */ new WeakSet();
     this.watchedCanvases = /* @__PURE__ */ new WeakSet();
     this.warned = /* @__PURE__ */ new Set();
+    // ---------- `![[note]]` embeds as cards ----------
+    /** Expanded embed cards per note that holds them, for this session (a Live Preview redraw keeps them open). */
+    this.embedOpen = /* @__PURE__ */ new Map();
     // ---------- public API (for DataviewJS) ----------
     //
     //   bfv.embed(dv, dv.pages('#project'));                    // full, collapsible notes
@@ -441,10 +544,10 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     //   (bfv is a global alias of app.plugins.plugins["obsidian-backlinks-full-view"].api)
     this.api = {
       embed: (target, pages, opts = {}) => {
-        const container = target instanceof HTMLElement ? target : target.container;
-        const parentComp = target?.component ?? this;
-        const sourcePath = opts.sourcePath ?? target?.currentFilePath ?? "";
-        const arr = Array.isArray(pages) ? pages : Array.isArray(pages?.values) ? pages.values : Array.from(pages ?? []);
+        const container = isEl(target) ? target : target.container;
+        const parentComp = !isEl(target) && target.component || this;
+        const sourcePath = opts.sourcePath ?? (isEl(target) ? void 0 : target.currentFilePath) ?? "";
+        const arr = pageList(pages);
         const wrap = container.createDiv({ cls: "bfv-embeds" });
         this.wireLinks(wrap);
         const ancestors = /* @__PURE__ */ new Set();
@@ -463,7 +566,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
         const opened = /* @__PURE__ */ new Set();
         const seen = /* @__PURE__ */ new Set();
         for (const p of arr) {
-          const path = typeof p === "string" ? p : p?.file?.path ?? p?.path;
+          const path = pagePath(p);
           if (!path) continue;
           const f = this.app.vault.getAbstractFileByPath(path) ?? this.app.metadataCache.getFirstLinkpathDest(path, sourcePath);
           if (!(f instanceof import_obsidian2.TFile) || f.extension !== "md" || seen.has(f.path) || ancestors.has(f.path)) continue;
@@ -489,6 +592,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     this.addSettingTab(new FullBacklinksSettingTab(this.app, this));
     window.bfv = this.api;
     this.registerHoverLinkSource(HOVER_SOURCE, { display: "Backlinks Full View", defaultMod: true });
+    this.patchNoteEmbeds();
     this.addCommand({
       id: "diagnostics",
       name: "Show diagnostics",
@@ -575,6 +679,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     } catch (e) {
       this.warnOnce("dv-events", "Could not subscribe to Dataview events; query panes refresh on note changes only.");
     }
+    this.patchSetMode();
     this.app.workspace.onLayoutReady(() => {
       this.pendingAll = true;
       this.runRefresh();
@@ -619,10 +724,64 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     lines.push(`Note views tracked: ${this.views.size}`);
     return lines;
   }
+  /** Mode switches made with `view.setMode` (scripts, other plugins) fire no event: move the panes then too. */
+  patchSetMode() {
+    const plugin = this;
+    this.register(
+      around(import_obsidian2.MarkdownView.prototype, {
+        setMode: (next) => async function(mode) {
+          await next?.call(this, mode);
+          plugin.pendingViews.add(this);
+          plugin.schedule?.();
+        }
+      })
+    );
+  }
+  /**
+   * Obsidian leaves half the editor's height of padding below a note's last line, so in a short note the
+   * panes (after that padding) sat half a screen down. The panes follow the text by one empty line instead, the
+   * rest of that padding going below them (as core Backlinks in the note does). The edit mode's class isn't exported: patch it on first sight.
+   */
+  patchEditMode(view) {
+    const em = view.editMode;
+    if (!em) return;
+    const proto = Object.getPrototypeOf(em);
+    if (this.editModeProtos.has(proto) || typeof proto.updateBottomPadding !== "function") return;
+    this.editModeProtos.add(proto);
+    const plugin = this;
+    this.register(
+      around(proto, {
+        updateBottomPadding: (next) => function(height) {
+          next?.call(this, height);
+          plugin.fitBottomPadding(this, height);
+        }
+      })
+    );
+  }
+  fitBottomPadding(em, height) {
+    const el = em.sizerEl?.querySelector(":scope > .bfv-container");
+    const content = em.cm?.contentDOM;
+    if (!el || !content) return;
+    el.style.minHeight = "";
+    if (em.view?.backlinksEl?.isShown()) return;
+    if (content.win.getComputedStyle(content).paddingBottom !== content.style.paddingBottom) return;
+    const gap = Math.round(em.cm?.defaultLineHeight || FALLBACK_LINE_PX);
+    const margin = parseFloat(el.win.getComputedStyle(el).marginTop) || 0;
+    content.style.paddingBottom = Math.max(0, gap - margin) + "px";
+    el.style.minHeight = Math.max(0, height / 2 - gap) + "px";
+  }
+  /** Re-run Obsidian's bottom padding for a note view's editor, after the panes moved in or out of it. */
+  refitBottomPadding(view) {
+    if (!(view instanceof import_obsidian2.MarkdownView)) return;
+    const em = view.editMode;
+    const c = em?.containerEl;
+    if (em?.updateBottomPadding && c?.offsetParent) em.updateBottomPadding(c.clientHeight);
+  }
   /** First sight of a view: tear its state down when it closes (BFV-01) and notice when it's shown again. */
   observeView(view) {
     if (this.observed.has(view)) return;
     this.observed.add(view);
+    if (view instanceof import_obsidian2.MarkdownView) this.patchEditMode(view);
     this.roViews.set(view.containerEl, view);
     this.ro?.observe(view.containerEl);
     view.register(() => {
@@ -639,6 +798,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     vs.base?.component.unload();
     vs.el.remove();
     this.views.delete(view);
+    this.refitBottomPadding(view);
   }
   // ---------- refresh scheduling ----------
   /**
@@ -754,7 +914,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     const mo = new MutationObserver((muts) => {
       for (const m of muts) {
         const t = m.target;
-        const filled = t instanceof HTMLElement && t.classList.contains("canvas-node-content") && m.addedNodes.length;
+        const filled = isEl(t) && t.classList.contains("canvas-node-content") && m.addedNodes.length;
         const iframe = [...m.addedNodes, ...m.removedNodes].some((n) => n.nodeName === "IFRAME");
         if (filled || iframe) {
           this.pendingLayout = true;
@@ -818,7 +978,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
       return isEl(f) ? f : null;
     }
     const el = view.getMode() === "preview" ? view.previewMode?.renderer?.footer?.el : view.editMode?.sizerEl;
-    return el instanceof HTMLElement ? el : null;
+    return isEl(el) ? el : null;
   }
   hostFor(view) {
     const host = this.getHost(view);
@@ -834,6 +994,8 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     host.appendChild(vs.el);
     vs.host = host;
     this.watchHost(vs, host);
+    vs.el.style.minHeight = "";
+    this.refitBottomPadding(vs.view);
   }
   warnOnce(key, msg) {
     if (this.warned.has(key)) return;
@@ -954,6 +1116,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     if (!vs) {
       vs = this.createViewState(view, host);
       this.views.set(view, vs);
+      this.refitBottomPadding(view);
     } else this.attach(vs, host);
     vs.stale = false;
     if (!sources && !vs.notePath) sources = this.backlinkIndex(/* @__PURE__ */ new Set([file.path])).get(file.path);
@@ -981,12 +1144,12 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     const vs = st.view;
     const q = st.config.query.trim();
     if (st.deferred) {
-      st.countEl.setText(q ? "" : String(vs.sources.length));
+      st.countEl.setText(q ? "" : this.collapsedCount(st, vs.sources));
       return;
     }
     if (st.collapsed && !force) {
       st.stale = true;
-      if (!q && !st.search.trim() && !this.countRules(st.config.filter)) st.countEl.setText(String(vs.sources.length));
+      if (!q && !st.search.trim()) st.countEl.setText(this.collapsedCount(st, vs.sources));
       return;
     }
     st.stale = false;
@@ -1040,9 +1203,10 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
         const f = this.app.vault.getAbstractFileByPath(p);
         return f instanceof import_obsidian2.TFile && f.extension === "md";
       });
+      const hint = !out.length && resultRowCount(res.value) > 0;
       return {
         paths: out,
-        error: out.length ? void 0 : "The query returned no note links (use LIST or TABLE with file.link)."
+        error: hint ? "The query returned no note links (use LIST or TABLE with file.link)." : void 0
       };
     } catch (e) {
       return { paths: [], error: "Dataview: " + String(e?.message ?? e) };
@@ -1173,7 +1337,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
         if (!sortPanel.hasClass("bfv-hidden")) this.renderSortEditor(st);
       },
       updateButtons: () => {
-        const nf = this.countRules(st.config.filter);
+        const nf = countRules(st.config.filter);
         const ns = st.config.sorts.length;
         filterBtn.setText("Filter" + (nf ? ` \xB7 ${nf}` : ""));
         sortBtn.setText("Sort" + (ns ? ` \xB7 ${ns}` : ""));
@@ -1622,9 +1786,6 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
       this.configChanged(st, true);
     });
   }
-  countRules(g) {
-    return g.children.reduce((n, c) => n + (c.type === "group" ? this.countRules(c) : 1), 0);
-  }
   // ---------- data sync ----------
   itemData(src) {
     const cache = this.app.metadataCache.getFileCache(src);
@@ -1683,8 +1844,19 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
   }
   /** Property list and type inference for the filter/sort editors, in one pass over the items. */
   buildCatalogue(st) {
+    const { defs, types } = this.inferProps(st.items.values());
+    st.types = types;
+    st.propDefs = defs;
+    const key = defs.map((d) => d.id + ":" + d.type).join(",");
+    if (key !== st.propDefsKey) {
+      st.propDefsKey = key;
+      st.renderEditors();
+    }
+  }
+  /** The note properties of `items`, each with its type inferred from the values (file properties first). */
+  inferProps(items) {
     const stats = /* @__PURE__ */ new Map();
-    for (const it of st.items.values()) {
+    for (const it of items) {
       for (const lk in it.props) {
         let s = stats.get(lk);
         if (!s) {
@@ -1703,18 +1875,23 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
       }
     }
     const defs = [...FILE_PROPS];
-    st.types = new Map(FILE_PROPS.map((p) => [p.id, p.type]));
+    const types = new Map(FILE_PROPS.map((p) => [p.id, p.type]));
     for (const [lk, s] of [...stats].sort((a, b) => a[1].label.localeCompare(b[1].label))) {
       const type = s.list ? "list" : !s.any ? "text" : s.bool ? "boolean" : s.num ? "number" : s.date ? "date" : "text";
       defs.push({ id: "note." + lk, label: s.label, type, group: "note" });
-      st.types.set("note." + lk, type);
+      types.set("note." + lk, type);
     }
-    st.propDefs = defs;
-    const key = defs.map((d) => d.id + ":" + d.type).join(",");
-    if (key !== st.propDefsKey) {
-      st.propDefsKey = key;
-      st.renderEditors();
-    }
+    return { defs, types };
+  }
+  /**
+   * A collapsed pane's count: its backlinks, or "matching / all" when it has filter rules (worked out from
+   * metadata only, as expanding would show it before any search).
+   */
+  collapsedCount(st, sources) {
+    if (!countRules(st.config.filter)) return String(sources.length);
+    const items = sources.map((file) => ({ file, ...this.itemData(file) }));
+    const pred = this.compileNode(this.inferProps(items), st.config.filter);
+    return `${items.filter(pred).length} / ${items.length}`;
   }
   // ---------- evaluation ----------
   getVals(it, id) {
@@ -1954,7 +2131,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
       if (ok) shown++;
       if (it.el.hasClass("bfv-hidden") === ok) it.el.toggleClass("bfv-hidden", !ok);
     }
-    const filtered = q !== "" || this.countRules(st.config.filter) > 0;
+    const filtered = q !== "" || countRules(st.config.filter) > 0;
     st.countEl.setText(filtered ? `${shown} / ${all.length}` : String(all.length));
     st.emptyEl.setText(
       st.error ? st.error : all.length === 0 ? st.config.query ? "No notes." : "No backlinks found." : shown === 0 ? "No notes match the filters." : ""
@@ -2022,6 +2199,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
       if (!a) return;
       const href = a.getAttribute("data-href") ?? a.getAttribute("href");
       if (!href) return;
+      evt.stopPropagation();
       this.app.workspace.trigger("hover-link", {
         event: evt,
         source: HOVER_SOURCE,
@@ -2051,7 +2229,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
       attr: { "data-href": src.path }
     });
     const folder = src.parent && src.parent.path !== "/" ? src.parent.path : "";
-    if (folder) ih.createSpan({ cls: "bfv-item-path", text: folder + "/" });
+    if (folder) ih.createSpan({ cls: "bfv-item-path", text: `\u200E${folder}/\u200E` });
     const content = item.createDiv({ cls: "bfv-item-content markdown-rendered" });
     let rendered = false;
     let isOpen = false;
@@ -2158,5 +2336,68 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
         value(cell, v, k);
       }
     }
+  }
+  /**
+   * Wraps Obsidian's Markdown embed creator: an inline whole-note embed of a note (not a heading / block
+   * subpath, not a canvas file card, not an Excalidraw drawing) becomes the panes' card, collapsed at first.
+   * Everything else, and everything while the setting is off, stays Obsidian's.
+   */
+  patchNoteEmbeds() {
+    const registry = this.app.embedRegistry?.embedByExtension;
+    if (!registry || typeof registry.md !== "function") {
+      this.warnOnce("api-embedRegistry", "Obsidian API not available: embedRegistry. Embedded notes stay Obsidian's.");
+      return;
+    }
+    const plugin = this;
+    this.register(
+      around(registry, {
+        md: (next) => function(ctx, file, subpath) {
+          const card = plugin.cardEmbedFor(ctx, file, subpath);
+          return card ?? next.call(this, ctx, file, subpath);
+        }
+      })
+    );
+    this.rerenderNoteEmbeds();
+    this.register(() => window.setTimeout(() => this.rerenderNoteEmbeds(), 0));
+  }
+  cardEmbedFor(ctx, file, subpath) {
+    if (!this.settings.noteEmbeds || !ctx.showInline || subpath || file.extension !== "md") return null;
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (fm && "excalidraw-plugin" in fm) return null;
+    if (file.path === ctx.sourcePath || ctx.containerEl.closest(`[data-bfv-path="${CSS.escape(file.path)}"]`))
+      return null;
+    if ((ctx.depth ?? 0) > MAX_EMBED_DEPTH) return null;
+    return new NoteEmbedCard(this, ctx, file);
+  }
+  /** Builds the card for a `NoteEmbedCard` (kept here: it shares the panes' card and link handling). */
+  buildEmbedCard(ctx, file, owner) {
+    const el = ctx.containerEl;
+    el.empty();
+    el.removeClass("markdown-embed", "inline-embed");
+    el.addClass("bfv-note-embed");
+    this.wireLinks(el);
+    let opened = this.embedOpen.get(ctx.sourcePath);
+    if (!opened) this.embedOpen.set(ctx.sourcePath, opened = /* @__PURE__ */ new Set());
+    const card = this.buildCard(el, file, owner, opened);
+    owner.registerEvent(
+      this.app.vault.on("modify", (f) => {
+        if (f.path === file.path) card.invalidate();
+      })
+    );
+    owner.registerEvent(
+      this.app.metadataCache.on("changed", (f) => {
+        if (f.path === file.path) card.invalidate();
+      })
+    );
+    return card;
+  }
+  /** Redraws every open note so embeds follow the setting (and Obsidian's come back on unload). */
+  rerenderNoteEmbeds() {
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const v = leaf.view;
+      if (!(v instanceof import_obsidian2.MarkdownView)) return;
+      if (v.getMode() === "preview") v.previewMode.rerender(true);
+      else leaf.rebuildView?.();
+    });
   }
 };

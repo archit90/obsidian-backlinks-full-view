@@ -143,10 +143,20 @@
    which Obsidian caps at --file-line-width only while "Readable line length" is on, so the panel is exactly as
    wide as the note's text either way. */
 .bfv-container {
-  margin-top: 3rem;
+  /* one empty text line between the note and its panes, in every mode (main.ts keeps the editors' padding to it) */
+  margin-top: calc(var(--line-height-normal) * var(--font-text-size));
   width: 100%;
   max-width: 100%;
   margin-inline: auto;
+}
+/* In a short note the editor's content box grows to fill the view, which put the panes at the bottom of the
+   screen: let the panes take that space instead, so they follow the text (main.ts fitBottomPadding keeps
+   room to scroll past the end, as core Backlinks does). */
+.markdown-source-view.mod-cm6 .cm-sizer:has(> .bfv-container) > .cm-contentContainer {
+  flex-grow: 0;
+}
+.cm-sizer > .bfv-container {
+  flex-grow: 1;
 }
 /* fallback host (the view's content element) follows the same setting */
 .view-content:has(> .markdown-source-view.is-readable-line-width) > .bfv-container,
@@ -224,4 +234,13 @@
 .bfv-op-mismatch {
   border-color: var(--text-warning, #e0a500);
   color: var(--text-warning, #e0a500);
+}
+
+/* `![[note]]` embeds shown as the panes' card (setting "Show embedded notes as cards") */
+.bfv-note-embed {
+  display: block;
+  margin-block: var(--p-spacing, 1rem);
+}
+.bfv-note-embed > .bfv-item {
+  margin: 0;
 }

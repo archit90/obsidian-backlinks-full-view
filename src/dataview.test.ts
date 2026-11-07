@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { notePathsInResult } from "./dataview";
+import { notePathsInResult, resultRowCount } from "./dataview";
 
 const link = (path: string) => ({ path, type: "file" });
 const paths = (v: unknown) => [...notePathsInResult(v)];
@@ -35,5 +35,14 @@ describe("notePathsInResult", () => {
     expect(paths({ type: "list", values: ["text", 3] })).toEqual([]);
     const deep = { a: { b: { c: { d: { e: { f: link("deep.md") } } } } } };
     expect(paths({ type: "other", values: [deep] })).toEqual([]);
+  });
+});
+
+describe("resultRowCount", () => {
+  it("counts rows, so an empty result can be told from one without links", () => {
+    expect(resultRowCount({ type: "list", values: [] })).toBe(0);
+    expect(resultRowCount({ type: "table", values: [[3], [4]] })).toBe(2);
+    expect(resultRowCount(null)).toBe(0);
+    expect(resultRowCount({ type: "list" })).toBe(0);
   });
 });

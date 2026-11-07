@@ -9,5 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --root .. backlinks-full-view"
   },
-  "dependencies": {}
+  "dependencies": {
+    "monkey-around": "^3.0.0"
+  }
 }
