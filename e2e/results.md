@@ -1,7 +1,7 @@
 # Backlinks Full View e2e results
 
-Run 2026-11-08T15:42:54.959Z against vault (Obsidian 1.15.0).
-295/295 checks, 95/95 cases passed. ResizeObserver loop warnings (benign): 0.
+Run 2026-11-08T20:12:58.887Z against a sandbox vault (Obsidian 1.15.0), other plugins: none.
+329/329 checks, 101/101 cases passed, 8 skipped. ResizeObserver loop warnings (benign): 0.
 
 | Case | Result | Failed checks |
 |---|---|---|
@@ -19,7 +19,6 @@ Run 2026-11-08T15:42:54.959Z against vault (Obsidian 1.15.0).
 | A12 | PASS |  |
 | B1 | PASS |  |
 | B2 | PASS |  |
-| B3 | PASS |  |
 | B4 | PASS |  |
 | B5 | PASS |  |
 | B6 | PASS |  |
@@ -29,6 +28,7 @@ Run 2026-11-08T15:42:54.959Z against vault (Obsidian 1.15.0).
 | B12 | PASS |  |
 | B8 | PASS |  |
 | B9 | PASS |  |
+| B13 | PASS |  |
 | C1-lp | PASS |  |
 | C2-lp | PASS |  |
 | C3-lp | PASS |  |
@@ -43,6 +43,7 @@ Run 2026-11-08T15:42:54.959Z against vault (Obsidian 1.15.0).
 | C4-reading | PASS |  |
 | C5 | PASS |  |
 | C6 | PASS |  |
+| C7 | PASS |  |
 | D1 | PASS |  |
 | D2 | PASS |  |
 | D3 | PASS |  |
@@ -62,6 +63,7 @@ Run 2026-11-08T15:42:54.959Z against vault (Obsidian 1.15.0).
 | F5 | PASS |  |
 | F6 | PASS |  |
 | F7 | PASS |  |
+| F8 | PASS |  |
 | G1 | PASS |  |
 | G2 | PASS |  |
 | G3 | PASS |  |
@@ -70,8 +72,9 @@ Run 2026-11-08T15:42:54.959Z against vault (Obsidian 1.15.0).
 | H1 | PASS |  |
 | H2 | PASS |  |
 | H3 | PASS |  |
-| I1 | PASS |  |
-| I2 | PASS |  |
+| I3 | PASS |  |
+| I4 | PASS |  |
+| I5 | PASS |  |
 | J1 | PASS |  |
 | J2 | PASS |  |
 | J3 | PASS |  |
@@ -80,14 +83,16 @@ Run 2026-11-08T15:42:54.959Z against vault (Obsidian 1.15.0).
 | J6 | PASS |  |
 | J7 | PASS |  |
 | J8 | PASS |  |
-| K1 | PASS |  |
-| K2 | PASS |  |
-| K3 | PASS |  |
-| L1 | PASS |  |
+| K4 | PASS |  |
+| K5 | PASS |  |
+| L2 | PASS |  |
+| L3 | PASS |  |
 | M1 | PASS |  |
 | M2 | PASS |  |
 | M3 | PASS |  |
 | M4 | PASS |  |
+| M5 | PASS |  |
+| M6 | PASS |  |
 | N1 | PASS |  |
 | N2 | PASS |  |
 | Q1-reading | PASS |  |
@@ -99,4 +104,13 @@ Run 2026-11-08T15:42:54.959Z against vault (Obsidian 1.15.0).
 | Q4 | PASS |  |
 | Q5 | PASS |  |
 | Q6 | PASS |  |
+| Q9 | PASS |  |
 | P1 | PASS |  |
+| B3 | SKIP | needs dataview |
+| I1 | SKIP | needs editor-multiple-lanes |
+| I2 | SKIP | needs editor-multiple-lanes |
+| K1 | SKIP | needs dataview |
+| K2 | SKIP | needs dataview |
+| K3 | SKIP | needs dataview |
+| L1 | SKIP | needs dataview |
+| Q7 | SKIP | needs editor-multiple-lanes |

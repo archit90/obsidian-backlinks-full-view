@@ -1,4 +1,5 @@
-import type { Component, MarkdownView, TFile, debounce } from "obsidian";
+import type { Component, MarkdownView, TFile } from "obsidian";
+import type { Debounced } from "./debounce";
 
 /**
  * The markdown embed inside a canvas note card (Obsidian internal, checked in 1.15.0). While the card is being
@@ -14,7 +15,8 @@ export interface CanvasEmbed extends Component {
 
 /** Where panes are shown: a note tab, or a note card on a canvas. */
 export type NoteView = MarkdownView | CanvasEmbed;
-import type { Entry, PropDef, PropType, Settings } from "./config";
+import type { Entry, PaneConfig, PropDef, PropType } from "./config";
+import type { NoteProps } from "./values";
 
 // ---------- runtime state ----------
 
@@ -46,7 +48,6 @@ export interface PanelState {
   component: Component;
   signature: string; // what the current items were synced from
   collapsed: boolean;
-  stale: boolean; // collapsed after being built and skipped by a refresh: refresh on expand
   dead: boolean; // unloaded: late debounced callbacks must do nothing
   opened: Set<string>; // the view's expanded cards (ViewState.opened, shared by all its panes)
   items: Map<string, ItemState>;
@@ -71,7 +72,7 @@ export interface PanelState {
   error: string; // Dataview query error, shown in place of the list
   ephemeral: boolean; // the built-in "All backlinks" pane: never written to frontmatter
   deferred: boolean; // built lazily: cards are created only once the pane is first expanded
-  config: Settings; // this pane's filter/sort (stored as one entry of the note's `backlinks` list)
+  config: PaneConfig; // this pane's filter/sort (stored as one entry of the note's `backlinks` list)
   raw: Record<string, unknown> | null; // the entry as read (unknown keys are written back unchanged)
   srcIndex: number | null; // index of that entry in the list on disk
   parseErrors: string[];
@@ -83,9 +84,8 @@ export interface ViewState {
   view: NoteView;
   el: HTMLElement;
   warnEl: HTMLElement; // note-level frontmatter problems
-  addBtn: HTMLElement; // the actions row (+ Add backlinks pane, canvas toggle): always last, panes go before it
+  actionsEl: HTMLElement; // the actions row (+ Add backlinks pane, canvas toggle): always last, panes go before it
   canvasBtn: HTMLElement; // "Enable in canvas" / "Disable in canvas"
-  host: HTMLElement | null;
   panes: PanelState[]; // the note's own panes, saved in its `backlinks` frontmatter
   base: PanelState | null; // built-in pane every note gets (plain backlinks, starts collapsed, not saved)
   notePath: string | null;
@@ -96,6 +96,7 @@ export interface ViewState {
   listError: string; // `backlinks` itself isn't a pane list
   dirty: boolean; // local edits not yet written
   configPending: boolean; // a pane settings edit is waiting (uses the short save delay)
+  writeFailed: boolean; // the last write failed (nothing written): the next change of the note tries again
   // expanded cards: one list for the note (`backlinks-open`), shared by every pane, All backlinks included
   opened: Set<string>; // cards expanded now (cards hold a reference: mutate in place)
   openOrder: string[]; // expanded cards in the order they were opened, most recent last
@@ -105,8 +106,8 @@ export interface ViewState {
   openError: string; // `backlinks-open` isn't a list of paths: it isn't written until fixed
   openDirty: boolean; // `open` changed and isn't written yet
   graceUntil: number;
-  saveSoon: ReturnType<typeof debounce>;
-  saveLater: ReturnType<typeof debounce>;
+  saveSoon: Debounced<[]>;
+  saveLater: Debounced<[]>;
   sources: TFile[]; // the note's backlinks as of the last refresh
   sourcePaths: Set<string>;
   srcSig: string; // path:version of every source
@@ -116,6 +117,8 @@ export interface ViewState {
   reattachSince: number;
 }
 
+/** What search and filters read of a note: its content properties and its tags. */
+export type NoteData = NoteProps & { tags: string[] };
 /** What filters and search read of a card's note (an item, or a lightweight stand-in for a collapsed pane's count). */
 export type ItemData = Pick<ItemState, "file" | "props" | "labels" | "lists" | "tags">;
 /** Property types a filter is evaluated with. */

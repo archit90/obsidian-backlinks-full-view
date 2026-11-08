@@ -1,19 +1,20 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type FullBacklinksPlugin from "./main";
 import { MAX_OPEN_SAVED } from "./constants";
+import { isPlainObject } from "./values";
 
 /** Plugin-wide settings (data.json). Per-note pane settings live in frontmatter (see config.ts). */
 export interface PluginSettings {
   canvas: boolean; // show panes on canvas note cards (while editing, and in reading view when the note opts in)
   noteEmbeds: boolean; // render `![[note]]` embeds as collapsible cards, as in the panes
-  embedFullPath: boolean; // every note card (panes, embeds, bfv.embed) is titled with the note's full path
+  cardFullPath: boolean; // every note card (panes, embeds, bfv.embed) is titled with the note's full path
   maxOpen: number; // expanded cards remembered per note in `backlinks-open` (0: not remembered)
 }
 
 export const PLUGIN_DEFAULTS: PluginSettings = {
   canvas: true,
   noteEmbeds: true,
-  embedFullPath: true,
+  cardFullPath: true,
   maxOpen: MAX_OPEN_SAVED,
 };
 
@@ -21,6 +22,26 @@ export const PLUGIN_DEFAULTS: PluginSettings = {
 export function maxOpenOf(v: unknown): number {
   const n = typeof v === "string" && v.trim() !== "" ? Number(v) : v;
   return typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 500 ? n : MAX_OPEN_SAVED;
+}
+
+/**
+ * The settings in data.json (`raw`, null when there's none), with the default for anything missing or invalid.
+ * `migrated`: the data used an older key (`embedFullPath`, now `cardFullPath`), so it should be saved again.
+ */
+export function settingsFrom(raw: unknown): { settings: PluginSettings; migrated: boolean } {
+  const d = isPlainObject(raw) ? raw : {};
+  const bool = (v: unknown, def: boolean) => (typeof v === "boolean" ? v : def);
+  const migrated = "embedFullPath" in d;
+  const fullPath = "cardFullPath" in d ? d.cardFullPath : d.embedFullPath;
+  return {
+    settings: {
+      canvas: bool(d.canvas, PLUGIN_DEFAULTS.canvas),
+      noteEmbeds: bool(d.noteEmbeds, PLUGIN_DEFAULTS.noteEmbeds),
+      cardFullPath: bool(fullPath, PLUGIN_DEFAULTS.cardFullPath),
+      maxOpen: maxOpenOf(d.maxOpen),
+    },
+    migrated,
+  };
 }
 
 export class FullBacklinksSettingTab extends PluginSettingTab {
@@ -66,8 +87,8 @@ export class FullBacklinksSettingTab extends PluginSettingTab {
           "with the note's full path (folder/sub/name). Off: the note's name, with its folder in a faint label on the right.",
       )
       .addToggle(t =>
-        t.setValue(this.plugin.settings.embedFullPath).onChange(async v => {
-          this.plugin.settings.embedFullPath = v;
+        t.setValue(this.plugin.settings.cardFullPath).onChange(async v => {
+          this.plugin.settings.cardFullPath = v;
           await this.plugin.saveSettings();
           this.plugin.applyCardTitles();
         }),

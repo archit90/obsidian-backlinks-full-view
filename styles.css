@@ -46,12 +46,16 @@
   background: var(--background-secondary, rgba(128, 128, 128, 0.1));
   border-radius: inherit;
 }
-.bfv-item-title {
-  font-weight: 500;
-}
 /* a card titled with the note's full path (a setting): a long one wraps instead of overflowing */
 .bfv-item-title {
+  font-weight: 500;
   overflow-wrap: anywhere;
+}
+/* pane and card headers are buttons a keyboard can reach (Tab, then Enter or Space) */
+.bfv-header:focus-visible,
+.bfv-item-header:focus-visible {
+  outline: 2px solid var(--interactive-accent, #7b6cd9);
+  outline-offset: 1px;
 }
 .bfv-item-content {
   padding: 4px 14px 10px;
@@ -148,10 +152,15 @@
    wide as the note's text either way. */
 .bfv-container {
   /* one empty text line between the note and its panes, in every mode (main.ts keeps the editors' padding to it) */
-  margin-top: calc(var(--line-height-normal) * var(--font-text-size));
+  margin-top: calc(var(--line-height-normal, 1.5) * var(--font-text-size, 16px));
   width: 100%;
   max-width: 100%;
   margin-inline: auto;
+}
+/* A host that opts its notes out (an ancestor with data-bfv-skip, e.g. a lanes tab of Editor Multiple Lanes): no panes
+   are built there, and any already shown are hidden until the next refresh removes them. */
+[data-bfv-skip] .bfv-container {
+  display: none;
 }
 /* In a short note the editor's content box grows to fill the view, which put the panes at the bottom of the
    screen: let the panes take that space instead, so they follow the text (main.ts fitBottomPadding keeps

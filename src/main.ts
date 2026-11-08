@@ -11,9 +11,12 @@ import {
   Plugin,
   TAbstractFile,
   TFile,
-  Debouncer,
-  debounce,
+  View,
+  WorkspaceLeaf,
+  getLinkpath,
+  parseFrontMatterTags,
 } from "obsidian";
+import { Debounced, debounce } from "./debounce";
 import {
   Entry,
   FILE_PROPS,
@@ -22,10 +25,10 @@ import {
   NO_VALUE,
   OPS,
   OP_TYPE_ORDER,
+  PaneConfig,
   PropDef,
   PropType,
   Rule,
-  Settings,
   SortRule,
   clone,
   countRules,
@@ -56,10 +59,21 @@ import {
 } from "./constants";
 import { notePathsInResult, resultRowCount } from "./dataview";
 import { around } from "monkey-around";
-import { FullBacklinksSettingTab, PLUGIN_DEFAULTS, PluginSettings, maxOpenOf } from "./settings";
+import { FullBacklinksSettingTab, PLUGIN_DEFAULTS, PluginSettings, settingsFrom } from "./settings";
 import { SearchNode, evalSearch, parseSearch } from "./search";
-import { CanvasEmbed, ItemData, ItemState, NoteView, PanelState, Pred, QueryResult, Typed, ViewState } from "./state";
-import { DATE_RE, localIso, normDate, toStrings } from "./values";
+import {
+  CanvasEmbed,
+  ItemData,
+  ItemState,
+  NoteData,
+  NoteView,
+  PanelState,
+  Pred,
+  QueryResult,
+  Typed,
+  ViewState,
+} from "./state";
+import { DATE_RE, contentKeys, localIso, normDate, noteBody, noteProps } from "./values";
 
 /** A canvas card's child, if it's a markdown note embed (duck-typed: the class isn't exported). */
 function asCanvasEmbed(child: unknown): CanvasEmbed | null {
@@ -80,6 +94,8 @@ interface EmbedOptions {
   collapsed?: boolean;
   sourcePath?: string;
   limit?: number;
+  /** Owns the cards: they're unloaded with it (default: the DataviewJS block's, else until the element is gone). */
+  component?: Component;
 }
 
 /** `bfv.embed`'s pages: an array, a Dataview DataArray (`.values`), or any iterable; else nothing. */
@@ -150,10 +166,33 @@ function isInlineEmbed(el: HTMLElement): boolean {
   );
 }
 
+/**
+ * Makes a header a toggle a keyboard can use: a button (a tab stop; the caller keeps `aria-expanded`) that Enter or
+ * Space toggles while it has the focus itself, not a link or button inside it. A mouse press on it doesn't take the
+ * focus, so an editor keeps its cursor and focus as before.
+ */
+function asToggle(el: HTMLElement, toggle: () => void) {
+  el.setAttrs({ role: "button", tabindex: "0" });
+  el.addEventListener("mousedown", e => {
+    const t = e.target as Element | null;
+    if (t && t !== el && typeof t.closest === "function" && t.closest("a, button, input, select")) return;
+    e.preventDefault();
+  });
+  el.addEventListener("keydown", e => {
+    if (e.target !== el || (e.key !== "Enter" && e.key !== " ")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    toggle();
+  });
+}
+
 export default class FullBacklinksPlugin extends Plugin {
   override settings: PluginSettings = { ...PLUGIN_DEFAULTS };
   private views = new Map<NoteView, ViewState>();
-  private observed = new WeakSet<NoteView>(); // views whose close tears down their state
+  /** A child component on every view seen: its unload (the view closing, or this plugin unloading) tears down. */
+  private viewHooks = new Map<NoteView, Component>();
+  /** Views left without panes on purpose (opted out, canvas off, no file): their resizes need no refresh. */
+  private skippedViews = new WeakSet<NoteView>();
   private roViews = new WeakMap<Element, NoteView>();
   private ro: ResizeObserver | null = null; // notices a hidden view being shown again
   private linksResolvedOnce = false; // set by the first "resolved" event after the plugin loads
@@ -168,15 +207,21 @@ export default class FullBacklinksPlugin extends Plugin {
   private pendingDv = false;
   private queryCache = new Map<string, Promise<QueryResult>>(); // per refresh cycle
   private bodies = new Map<string, string>(); // lower-cased note text for full-text search, shared by panes
+  /** What search and filters read of a note, per path, as of its version (see `versions`). */
+  private itemCache = new Map<string, { ver: number; file: TFile; data: NoteData }>();
+  /** `bfv.embed` calls into a plain element: owned by the plugin until the element leaves the page. */
+  private looseEmbeds = new Set<{ wrap: HTMLElement; owner: Component; seen: boolean }>();
+  private writeNoticeShown = new Set<string>(); // notes whose failed save was reported (once until it works again)
   private fullTextPanes = new Set<PanelState>(); // panes whose full-text search holds bodies
   private collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-  private schedule: Debouncer<[], void> | null = null;
+  private schedule: Debounced<[]> | null = null;
   /** Dataview reindexes on every autosave: its query re-runs wait for a pause in typing. */
-  private dvSchedule: Debouncer<[], void> | null = null;
+  private dvSchedule: Debounced<[]> | null = null;
 
   override async onload() {
-    this.settings = Object.assign({}, PLUGIN_DEFAULTS, await this.loadData());
-    this.settings.maxOpen = maxOpenOf(this.settings.maxOpen);
+    const loaded = settingsFrom(await this.loadData());
+    this.settings = loaded.settings;
+    if (loaded.migrated) await this.saveData(this.settings); // the older key is written once more, renamed
     this.addSettingTab(new FullBacklinksSettingTab(this.app, this));
     // short global for DataviewJS:  bfv.embed(dv, dv.pages("#x"))
     window.bfv = this.api;
@@ -189,6 +234,8 @@ export default class FullBacklinksPlugin extends Plugin {
     });
     for (const m of this.missingApis())
       this.warnOnce("api-" + m, `Obsidian API not available: ${m}. Some features are disabled.`);
+    for (const i of this.internals())
+      if (i.ok === false) this.warnOnce("internal-" + i.name, `Obsidian internal not found: ${i.name}.`);
     this.schedule = debounce(() => this.runRefresh(), REFRESH_DELAY, true);
     this.dvSchedule = debounce(
       () => {
@@ -202,7 +249,7 @@ export default class FullBacklinksPlugin extends Plugin {
     this.ro = new ResizeObserver(entries => {
       for (const e of entries) {
         const view = this.roViews.get(e.target);
-        if (!view?.file || !view.containerEl.isShown()) continue;
+        if (!view?.file || this.skippedViews.has(view) || !view.containerEl.isShown()) continue;
         const vs = this.views.get(view);
         if (!vs || vs.stale) {
           this.pendingViews.add(view);
@@ -229,6 +276,7 @@ export default class FullBacklinksPlugin extends Plugin {
         if (!this.linksResolvedOnce) {
           this.linksResolvedOnce = true;
           this.pendingAll = true;
+          this.itemCache.clear(); // read before the metadata cache was complete
         }
         this.schedule?.(); // backlinks of pending paths are only final once links are resolved
       }),
@@ -249,27 +297,26 @@ export default class FullBacklinksPlugin extends Plugin {
         }
         touch(oldPath);
         touch(file.path);
+        this.renamed(oldPath, file.path);
       }),
     );
     this.registerEvent(
       this.app.vault.on("delete", (file: TAbstractFile) => {
-        if (file instanceof TFile) touch(file.path);
+        if (!(file instanceof TFile)) return;
+        touch(file.path);
+        this.forget(file.path);
       }),
     );
     // Dataview signals (only fire when Dataview is installed)
-    try {
-      const mc = this.app.metadataCache;
-      this.registerEvent(
-        mc.on("dataview:index-ready", () => {
-          this.dvEpoch++;
-          this.pendingDv = true;
-          this.schedule?.();
-        }),
-      );
-      this.registerEvent(mc.on("dataview:metadata-change", () => this.dvSchedule?.()));
-    } catch (e) {
-      this.warnOnce("dv-events", "Could not subscribe to Dataview events; query panes refresh on note changes only.");
-    }
+    const mc = this.app.metadataCache;
+    this.registerEvent(
+      mc.on("dataview:index-ready", () => {
+        this.dvEpoch++;
+        this.pendingDv = true;
+        this.schedule?.();
+      }),
+    );
+    this.registerEvent(mc.on("dataview:metadata-change", () => this.dvSchedule?.()));
     this.patchSetMode();
     this.app.workspace.onLayoutReady(() => {
       this.pendingAll = true;
@@ -283,8 +330,41 @@ export default class FullBacklinksPlugin extends Plugin {
     this.dvSchedule?.cancel();
     if (window.bfv === this.api) delete window.bfv;
     this.ro?.disconnect();
-    for (const view of [...this.views.keys()]) this.destroyView(view); // flushes pending writes first
+    // the hooks on views come off with the plugin: removing one tears its view's panes down (writes pending edits)
+    for (const [view, hook] of [...this.viewHooks]) view.removeChild(hook);
+    for (const view of [...this.views.keys()]) this.destroyView(view);
+    for (const [view, hook] of [...this.canvasHooks]) view.removeChild(hook);
     this.bodies.clear();
+    this.itemCache.clear();
+  }
+
+  /** Settings changed in data.json by something else (sync from another device): apply them. */
+  override async onExternalSettingsChange() {
+    const prev = this.settings;
+    this.settings = settingsFrom(await this.loadData()).settings;
+    this.settingsApplied();
+    if (prev.noteEmbeds !== this.settings.noteEmbeds) this.rerenderNoteEmbeds();
+    if (prev.cardFullPath !== this.settings.cardFullPath) this.applyCardTitles();
+  }
+
+  /** Session state of a path that was renamed: it moves with the note. */
+  private renamed(oldPath: string, newPath: string) {
+    this.versions.delete(oldPath);
+    this.itemCache.delete(oldPath);
+    const held = this.embedOpen.get(oldPath);
+    if (held) {
+      this.embedOpen.delete(oldPath);
+      this.embedOpen.set(newPath, held);
+    }
+    for (const set of this.embedOpen.values()) if (set.delete(oldPath)) set.add(newPath);
+  }
+
+  /** Session state of a deleted path. */
+  private forget(path: string) {
+    this.versions.delete(path);
+    this.itemCache.delete(path);
+    this.embedOpen.delete(path);
+    for (const set of this.embedOpen.values()) set.delete(path);
   }
 
   private missingApis(): string[] {
@@ -295,6 +375,52 @@ export default class FullBacklinksPlugin extends Plugin {
     return out;
   }
 
+  /**
+   * The Obsidian internals the plugin relies on (checked against 1.15.0), and whether each is there now: `null`
+   * when it can't be told (no note open in that mode, no canvas open, Dataview not enabled).
+   */
+  private internals(): { name: string; ok: boolean | null }[] {
+    const ws = this.app.workspace;
+    const view = ws.getActiveViewOfType(MarkdownView);
+    const em = view?.editMode;
+    const editing = view && view.getMode() !== "preview" ? em : undefined;
+    let canvas: boolean | null = null;
+    ws.iterateAllLeaves(leaf => {
+      const c = leaf.view.canvas;
+      if (c && canvas !== false) canvas = c.nodes instanceof Map;
+    });
+    const dv = this.app.plugins?.plugins?.dataview;
+    return [
+      {
+        name: "embedRegistry.embedByExtension.md (embedded notes as cards)",
+        ok: typeof this.app.embedRegistry?.embedByExtension?.md === "function",
+      },
+      {
+        name: "MarkdownView.setMode (panes follow mode switches)",
+        ok: typeof MarkdownView.prototype.setMode === "function",
+      },
+      {
+        name: "WorkspaceLeaf.rebuildView (redrawing embeds)",
+        ok: typeof WorkspaceLeaf.prototype.rebuildView === "function",
+      },
+      {
+        name: "edit mode sizerEl / cm / updateBottomPadding (placement in editing modes)",
+        ok: editing
+          ? isEl(editing.sizerEl) && isEl(editing.cm?.contentDOM) && typeof editing.updateBottomPadding === "function"
+          : null,
+      },
+      {
+        name: "previewMode.renderer.footer (placement in Reading view)",
+        ok: view && view.getMode() === "preview" ? isEl(view.previewMode?.renderer?.footer?.el) : null,
+      },
+      { name: "canvas.nodes (panes on canvas cards)", ok: canvas },
+      {
+        name: "Dataview index.initialized and api.query (query panes)",
+        ok: dv ? typeof dv.index?.initialized === "boolean" && typeof dv.api?.query === "function" : null,
+      },
+    ];
+  }
+
   private diagnostics(): string[] {
     const lines = ["Backlinks Full View diagnostics"];
     const dv = this.app.plugins?.plugins?.dataview;
@@ -303,6 +429,12 @@ export default class FullBacklinksPlugin extends Plugin {
     );
     const missing = this.missingApis();
     lines.push(missing.length ? "Missing Obsidian APIs: " + missing.join("; ") : "Obsidian APIs: ok");
+    const internals = this.internals();
+    const bad = internals.filter(i => i.ok === false).map(i => i.name);
+    const checked = internals.filter(i => i.ok !== null).length;
+    lines.push(
+      bad.length ? "Obsidian internals NOT found: " + bad.join("; ") : `Obsidian internals: ok (${checked} checked)`,
+    );
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (view) {
       const host = this.getHost(view);
@@ -324,12 +456,13 @@ export default class FullBacklinksPlugin extends Plugin {
 
   /** Mode switches made with `view.setMode` (scripts, other plugins) fire no event: move the panes then too. */
   private patchSetMode() {
+    if (typeof MarkdownView.prototype.setMode !== "function") return; // reported by internals(); nothing to wrap
     const plugin = this;
     this.register(
       around(MarkdownView.prototype, {
         setMode: next =>
           async function (this: MarkdownView, mode: unknown) {
-            await next?.call(this, mode);
+            await next!.call(this, mode);
             plugin.pendingViews.add(this);
             plugin.schedule?.();
           },
@@ -384,17 +517,24 @@ export default class FullBacklinksPlugin extends Plugin {
     if (em?.updateBottomPadding && c?.offsetParent) em.updateBottomPadding(c.clientHeight);
   }
 
-  /** First sight of a view: tear its state down when it closes (BFV-01) and notice when it's shown again. */
+  /**
+   * First sight of a view: tear its panes down when it closes, and notice when it's shown again. The teardown is a
+   * child component of the view, so it comes off the view again when this plugin unloads (nothing of it stays
+   * on views that outlive the plugin).
+   */
   private observeView(view: NoteView) {
-    if (this.observed.has(view)) return;
-    this.observed.add(view);
+    if (this.viewHooks.has(view)) return;
     if (view instanceof MarkdownView) this.patchEditMode(view);
     this.roViews.set(view.containerEl, view);
     this.ro?.observe(view.containerEl);
-    view.register(() => {
+    const hook = new Component();
+    hook.register(() => {
+      this.viewHooks.delete(view);
       this.ro?.unobserve(view.containerEl);
       this.destroyView(view);
     });
+    this.viewHooks.set(view, hook);
+    view.addChild(hook);
   }
 
   private destroyView(view: NoteView) {
@@ -427,24 +567,24 @@ export default class FullBacklinksPlugin extends Plugin {
     this.pendingViews = new Set();
     this.queryCache.clear();
 
+    this.sweepLooseEmbeds();
     const jobs: { view: NoteView; needSources: boolean }[] = [];
     const visit = (view: NoteView) => {
       this.observeView(view);
       const vs = this.views.get(view);
-      // Opted out by its host: Editor Lanes sets data-bfv-skip on a lanes tab when "Show backlinks panes under lane
-      // notes" is off. Drop any panes already built there (re-built on the next layout-change once it's gone).
-      if (view.containerEl.closest(SKIP_SELECTOR)) {
-        if (vs) this.destroyView(view);
-        return;
-      }
-      // canvas cards always show panes while being edited; in their reading view only when the note opts in
+      // Opted out by its host (an ancestor with data-bfv-skip, e.g. a lanes tab of Editor Multiple Lanes while its
+      // "Show backlinks panes under lane notes" is off). Drop any panes already built there; they're built again on
+      // the next layout-change once the attribute is gone.
+      // Canvas cards always show panes while being edited; in their reading view only when the note opts in
       // (CANVAS_OPT_IN). Turning it off, or a card that stops editing, drops panes already built there.
       const canvasOff =
         !(view instanceof MarkdownView) && !isEl(view.editMode?.sizerEl) && !!view.file && !this.canvasOptIn(view.file);
-      if (!view.file || canvasOff) {
+      if (view.containerEl.closest(SKIP_SELECTOR) || !view.file || canvasOff) {
+        this.skippedViews.add(view);
         if (vs) this.destroyView(view);
         return;
       }
+      this.skippedViews.delete(view);
       if (!view.containerEl.isShown()) {
         // refreshed by the ResizeObserver once it's shown again
         // only when the change concerns it: a background tab of cards then needs no refresh on return
@@ -464,9 +604,17 @@ export default class FullBacklinksPlugin extends Plugin {
       if (paths.size && this.affects(vs, paths)) jobs.push({ view, needSources: true });
       else if (dv && vs.panes.some(p => !p.deferred && p.config.query.trim())) jobs.push({ view, needSources: false });
     };
+    // one view that throws (an internal that changed, a renderer failing on unload) mustn't stop the others
+    const guarded = (view: NoteView) => {
+      try {
+        visit(view);
+      } catch (e) {
+        console.error("[backlinks-full-view] refresh failed for", view.file?.path, e);
+      }
+    };
     this.app.workspace.iterateAllLeaves(leaf => {
       const view = leaf.view;
-      if (view instanceof MarkdownView) return visit(view);
+      if (view instanceof MarkdownView) return guarded(view);
       const nodes = view.canvas?.nodes;
       if (!nodes) return;
       if (!this.settings.canvas) {
@@ -477,10 +625,10 @@ export default class FullBacklinksPlugin extends Plugin {
         }
         return;
       }
-      this.watchCanvas(view.containerEl);
+      this.watchCanvas(view);
       for (const node of nodes.values()) {
         const embed = asCanvasEmbed(node.child);
-        if (embed) visit(embed);
+        if (embed) guarded(embed);
       }
     });
     if (!jobs.length) return;
@@ -497,7 +645,11 @@ export default class FullBacklinksPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
-    // canvas setting: build or drop canvas card panes, and show or hide the button everywhere
+    this.settingsApplied();
+  }
+
+  /** After a settings change: build or drop canvas card panes, and show or hide the canvas button everywhere. */
+  private settingsApplied() {
     for (const vs of this.views.values()) {
       const f = vs.notePath ? this.app.vault.getAbstractFileByPath(vs.notePath) : null;
       if (f instanceof TFile) this.updateCanvasBtn(vs, f);
@@ -526,7 +678,7 @@ export default class FullBacklinksPlugin extends Plugin {
   private async setCanvasOptIn(file: TFile, on: boolean) {
     if (typeof this.app.fileManager?.processFrontMatter !== "function") return;
     try {
-      await this.app.fileManager.processFrontMatter(file, fm => {
+      await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
         if (on) fm[CANVAS_OPT_IN] = true;
         else delete fm[CANVAS_OPT_IN];
       });
@@ -536,16 +688,16 @@ export default class FullBacklinksPlugin extends Plugin {
     }
   }
 
-  private watchedCanvases = new WeakSet<HTMLElement>();
+  /** The observer of every canvas view seen (a child component of the view: it stops when the canvas closes). */
+  private canvasHooks = new Map<View, Component>();
   /**
    * Canvas cards mount and unmount their note as they scroll in and out of view, with no event for it: watch
    * for a card's content being filled, and for its editor iframe being added or removed (editing starts or
    * stops: the panes move between the editor and the reading view), and refresh then. Unmounting unloads the
    * embed, which tears its panes down (observeView).
    */
-  private watchCanvas(el: HTMLElement) {
-    if (this.watchedCanvases.has(el)) return;
-    this.watchedCanvases.add(el);
+  private watchCanvas(view: View) {
+    if (this.canvasHooks.has(view)) return;
     const mo = new MutationObserver(muts => {
       for (const m of muts) {
         const t = m.target;
@@ -558,8 +710,14 @@ export default class FullBacklinksPlugin extends Plugin {
         }
       }
     });
-    mo.observe(el, { childList: true, subtree: true });
-    this.register(() => mo.disconnect());
+    mo.observe(view.containerEl, { childList: true, subtree: true });
+    const hook = new Component();
+    hook.register(() => {
+      mo.disconnect();
+      this.canvasHooks.delete(view);
+    });
+    this.canvasHooks.set(view, hook);
+    view.addChild(hook);
   }
 
   private affects(vs: ViewState, paths: Set<string>): boolean {
@@ -638,7 +796,6 @@ export default class FullBacklinksPlugin extends Plugin {
   private attach(vs: ViewState, host: HTMLElement) {
     if (vs.el.parentElement === host) return;
     host.appendChild(vs.el);
-    vs.host = host;
     this.watchHost(vs, host);
     vs.el.style.minHeight = "";
     this.refitBottomPadding(vs.view);
@@ -685,9 +842,8 @@ export default class FullBacklinksPlugin extends Plugin {
       view,
       el,
       warnEl,
-      addBtn: actions,
+      actionsEl: actions,
       canvasBtn,
-      host,
       panes: [],
       base: null,
       notePath: null,
@@ -698,6 +854,7 @@ export default class FullBacklinksPlugin extends Plugin {
       listError: "",
       dirty: false,
       configPending: false,
+      writeFailed: false,
       opened: new Set(),
       openOrder: [],
       open: [],
@@ -764,7 +921,7 @@ export default class FullBacklinksPlugin extends Plugin {
           }
           const pane = this.createPanel(vs, cfg, { raw, src: null, errors: [] });
           const at = Math.min(i, vs.panes.length);
-          vs.el.insertBefore(pane.el, vs.panes[at]?.el ?? vs.addBtn);
+          vs.el.insertBefore(pane.el, vs.panes[at]?.el ?? vs.actionsEl);
           vs.panes.splice(at, 0, pane);
           this.updateTitles(vs);
           this.persist(pane);
@@ -795,7 +952,7 @@ export default class FullBacklinksPlugin extends Plugin {
     this.loadConfig(vs, file);
     this.updateCanvasBtn(vs, file);
     if (switched || !vs.base) this.resetBase(vs);
-    vs.el.appendChild(vs.addBtn);
+    vs.el.appendChild(vs.actionsEl);
     if (vs.el.children[1] !== vs.base!.el) vs.warnEl.after(vs.base!.el); // always the first pane
 
     for (const pane of vs.panes) this.refreshPane(pane, file);
@@ -818,11 +975,10 @@ export default class FullBacklinksPlugin extends Plugin {
       return;
     }
     if (st.collapsed && !force) {
-      st.stale = true;
+      // refreshed when it's expanded again (the header click forces it)
       if (!q && !st.search.trim()) st.countEl.setText(this.collapsedCount(st, vs.sources));
       return;
     }
-    st.stale = false;
     if (!q) {
       st.error = "";
       return this.finishRefresh(st, vs.sources, "B|" + file.path + "|" + vs.srcSig);
@@ -831,7 +987,7 @@ export default class FullBacklinksPlugin extends Plugin {
     if (st.queryKey === key && st.queryEpoch === this.dvEpoch && st.queryPaths) return this.finishQuery(st, file, q);
     const id = ++st.reqId;
     const epoch = this.dvEpoch;
-    void this.runQueryCached(q, file).then(r => {
+    void this.runQueryCached(q, file, epoch).then(r => {
       if (id !== st.reqId || st.dead) return; // superseded
       st.queryKey = key;
       st.queryEpoch = epoch;
@@ -852,8 +1008,9 @@ export default class FullBacklinksPlugin extends Plugin {
     this.finishRefresh(st, files, sig);
   }
 
-  private runQueryCached(query: string, origin: TFile): Promise<QueryResult> {
-    const key = query + "\u0000" + origin.path;
+  /** One run per query, note and Dataview epoch (a result from before the index changed is never reused). */
+  private runQueryCached(query: string, origin: TFile, epoch: number): Promise<QueryResult> {
+    const key = epoch + "\u0000" + query + "\u0000" + origin.path;
     let p = this.queryCache.get(key);
     if (!p) {
       p = this.runQuery(query, origin);
@@ -938,12 +1095,12 @@ export default class FullBacklinksPlugin extends Plugin {
 
   private createPanel(
     vs: ViewState,
-    config: Settings,
+    config: PaneConfig,
     entry: Omit<Entry, "cfg"> | null,
     ephemeral = false,
   ): PanelState {
     const el = vs.el.createDiv({ cls: PANEL_CLASS });
-    vs.el.appendChild(vs.addBtn);
+    vs.el.appendChild(vs.actionsEl);
     const component = new Component();
     component.load();
 
@@ -1007,7 +1164,6 @@ export default class FullBacklinksPlugin extends Plugin {
       // every pane starts collapsed and is built on first expand
       signature: "",
       collapsed: true,
-      stale: false,
       dead: false,
       ephemeral,
       deferred: true,
@@ -1053,8 +1209,9 @@ export default class FullBacklinksPlugin extends Plugin {
     const applyCollapse = () => {
       el.toggleClass("is-collapsed", st.collapsed);
       chev.setText(st.collapsed ? "▸" : "▾");
+      header.setAttr("aria-expanded", String(!st.collapsed));
     };
-    header.addEventListener("click", () => {
+    const toggle = () => {
       st.collapsed = !st.collapsed;
       applyCollapse();
       if (st.collapsed) {
@@ -1063,7 +1220,9 @@ export default class FullBacklinksPlugin extends Plugin {
       }
       st.deferred = false;
       this.updatePane(st); // cheap when nothing changed (signature and query cache)
-    });
+    };
+    header.addEventListener("click", toggle);
+    asToggle(header, toggle);
     applyCollapse();
     if (ephemeral) {
       el.addClass("bfv-base");
@@ -1218,8 +1377,14 @@ export default class FullBacklinksPlugin extends Plugin {
       this.flush(vs); // edits belong to the previous note: write them there now
       vs.gen++;
       vs.graceUntil = 0;
+      vs.writeFailed = false;
     }
     const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (!switched && vs.writeFailed && (vs.dirty || vs.openDirty)) {
+      // a write failed before: the note changed, so try again (merged with the file as it is now)
+      this.flush(vs);
+      return;
+    }
     this.loadOpen(vs, fm, switched);
     const parsed = parseList(fm?.backlinks);
     const json = listJson(parsed.entries);
@@ -1361,6 +1526,15 @@ export default class FullBacklinksPlugin extends Plugin {
     const planned = plan(this.app.metadataCache.getFileCache(file)?.frontmatter);
     let written = planned;
     if (planned.changed) {
+      // what the file holds as far as this view knows, before the write: put back if the write fails
+      const before = {
+        prevJson: vs.prevJson,
+        savedJson: vs.savedJson,
+        baseList: vs.baseList,
+        openPrev: vs.openPrev,
+        openBase: vs.openBase,
+        graceUntil: vs.graceUntil,
+      };
       if (planned.entries && writeCfg) {
         vs.prevJson = vs.savedJson;
         vs.savedJson = listJson(planned.entries);
@@ -1371,6 +1545,7 @@ export default class FullBacklinksPlugin extends Plugin {
         vs.openBase = planned.open;
       }
       vs.graceUntil = Date.now() + 1500;
+      const assumed = { savedJson: vs.savedJson, baseList: vs.baseList, openBase: vs.openBase };
       try {
         await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
           written = plan(fm);
@@ -1387,9 +1562,38 @@ export default class FullBacklinksPlugin extends Plugin {
           }
         });
       } catch (e) {
-        console.error("[backlinks-full-view] couldn't save pane settings to", path, e);
+        // nothing was written (e.g. the frontmatter isn't valid YAML): keep the edits, written with the next
+        // change of the note or the next edit here, and say why once
+        if (!this.writeNoticeShown.has(file.path))
+          console.error("[backlinks-full-view] couldn't save pane settings to", path, e);
+        if (vs.gen === gen && this.views.has(vs.view)) {
+          if (vs.savedJson === assumed.savedJson && vs.baseList === assumed.baseList) {
+            vs.prevJson = before.prevJson;
+            vs.savedJson = before.savedJson;
+            vs.baseList = before.baseList;
+          }
+          if (vs.openBase === assumed.openBase) {
+            vs.openPrev = before.openPrev;
+            vs.openBase = before.openBase;
+          }
+          vs.graceUntil = before.graceUntil;
+          if (writeCfg) vs.dirty = true;
+          if (writeOpen) vs.openDirty = true;
+          vs.writeFailed = true;
+        }
+        if (!this.writeNoticeShown.has(file.path)) {
+          this.writeNoticeShown.add(file.path);
+          const why = e instanceof Error && e.message ? ` (${e.message.split("\n")[0]})` : "";
+          new Notice(
+            `Backlinks Full View couldn't save this note's pane settings: its frontmatter can't be updated${why}. ` +
+              "Your changes are kept and saved once it can be.",
+            10000,
+          );
+        }
         return;
       }
+      this.writeNoticeShown.delete(file.path);
+      vs.writeFailed = false;
     }
     if (written.open) this.afterOpenWrite(vs, gen, written.open, openOurs);
     if (writeCfg && written.entries) this.afterWrite(vs, gen, written.entries, ours);
@@ -1602,24 +1806,25 @@ export default class FullBacklinksPlugin extends Plugin {
 
   // ---------- data sync ----------
 
-  private itemData(src: TFile) {
+  /**
+   * What search and filters read of a note: its content properties (not this plugin's own keys) and its tags (the
+   * frontmatter's `tags` / `tag`, as a list or a string, and the #tags in its text). Cached per note version.
+   */
+  private itemData(src: TFile): NoteData {
+    const ver = this.verOf(src.path);
+    const hit = this.itemCache.get(src.path);
+    if (hit && hit.ver === ver && hit.file === src) return hit.data;
     const cache = this.app.metadataCache.getFileCache(src);
-    const fm = (cache?.frontmatter ?? {}) as Record<string, unknown>;
-    const props: Record<string, string[]> = {};
-    const labels: Record<string, string> = {};
-    const lists = new Set<string>();
-    for (const k of Object.keys(fm)) {
-      if (k === "position") continue;
-      const lk = k.toLowerCase();
-      props[lk] = toStrings(fm[k]);
-      if (!(lk in labels)) labels[lk] = k;
-      if (Array.isArray(fm[k])) lists.add(lk);
-    }
+    const fm = cache?.frontmatter as Record<string, unknown> | undefined;
     const tags = [
-      ...(cache?.tags ?? []).map(t => t.tag.replace(/^#/, "")),
-      ...toStrings(fm.tags ?? fm.tag).map(t => t.replace(/^#/, "")),
+      ...new Set([
+        ...(parseFrontMatterTags(fm ?? null) ?? []).map(t => t.replace(/^#/, "")),
+        ...(cache?.tags ?? []).map(t => t.tag.replace(/^#/, "")),
+      ]),
     ];
-    return { props, labels, lists, tags };
+    const data: NoteData = { ...noteProps(fm), tags };
+    this.itemCache.set(src.path, { ver, file: src, data });
+    return data;
   }
 
   /** Brings the pane's items in line with `sources`: unchanged notes are untouched, changed ones updated in place. */
@@ -1868,7 +2073,9 @@ export default class FullBacklinksPlugin extends Plugin {
           if (this.bodies.has(path)) return;
           let text = "";
           try {
-            text = (await this.app.vault.cachedRead(it.file)).toLowerCase();
+            // the text without its frontmatter (properties are searched without Full text already)
+            const fmEnd = this.app.metadataCache.getFileCache(it.file)?.frontmatterPosition?.end.offset;
+            text = noteBody(await this.app.vault.cachedRead(it.file), fmEnd).toLowerCase();
           } catch {
             /* unreadable: empty */
           }
@@ -1933,7 +2140,7 @@ export default class FullBacklinksPlugin extends Plugin {
     });
     const same = all.length === st.order.length && all.every((it, i) => it === st.order[i]);
     if (!same) {
-      const frag = document.createDocumentFragment();
+      const frag = st.listEl.doc.createDocumentFragment(); // the panes' own document (a popout, a canvas iframe)
       for (const it of all) frag.appendChild(it.el);
       st.listEl.appendChild(frag);
     }
@@ -2007,7 +2214,7 @@ export default class FullBacklinksPlugin extends Plugin {
       st.component,
       st.opened,
       (path, open) => this.cardToggled(st, path, open),
-      this.settings.embedFullPath,
+      this.settings.cardFullPath,
     );
     return { file: src, ver, el, comp, setOpen, invalidate, ...this.itemData(src) };
   }
@@ -2139,7 +2346,7 @@ export default class FullBacklinksPlugin extends Plugin {
       const ed = this.app.workspace.activeEditor;
       return ed?.file?.path === src.path && !!ed.editor?.hasFocus();
     };
-    const rerender: Debouncer<[], void> = debounce(
+    const rerender: Debounced<[]> = debounce(
       () => {
         if (isOpen && editingSource()) rerender();
         else if (isOpen) void render();
@@ -2158,16 +2365,21 @@ export default class FullBacklinksPlugin extends Plugin {
       isOpen = open;
       item.toggleClass("is-collapsed", !open);
       ichev.setText(open ? "▾" : "▸");
+      ih.setAttr("aria-expanded", String(open));
       if (open && !rendered) await render();
     };
-    ih.addEventListener("click", e => {
-      if ((e.target as HTMLElement).closest("a")) return; // the title link navigates; it doesn't toggle
+    const toggle = () => {
       const willOpen = item.hasClass("is-collapsed");
       if (willOpen) opened.add(src.path);
       else opened.delete(src.path);
       void setOpen(willOpen);
       onToggle?.(src.path, willOpen);
+    };
+    ih.addEventListener("click", e => {
+      if ((e.target as HTMLElement).closest("a")) return; // the title link navigates; it doesn't toggle
+      toggle();
     });
+    asToggle(ih, toggle);
     void setOpen(opened.has(src.path));
 
     return { el: item, comp, setOpen, invalidate };
@@ -2175,12 +2387,12 @@ export default class FullBacklinksPlugin extends Plugin {
 
   /**
    * A compact, read-only properties table at the top of a card (MarkdownRenderer drops frontmatter).
-   * Wiki links become internal links, so the panel's click/hover handling applies to them. `backlinks`
-   * is pane config, not content, so it's left out.
+   * Wiki links become internal links, so the panel's click/hover handling applies to them. This plugin's own keys
+   * (`backlinks`, `backlinks-open`, `canvas-full-backlinks-enabled`) are its settings, not content: left out.
    */
   private renderProperties(el: HTMLElement, src: TFile) {
     const fm = this.app.metadataCache.getFileCache(src)?.frontmatter as Record<string, unknown> | undefined;
-    const keys = Object.keys(fm ?? {}).filter(k => k !== "backlinks" && k !== "position");
+    const keys = contentKeys(fm);
     if (!fm || !keys.length) return;
     const table = el.createDiv({ cls: "bfv-props" });
     const LINK = /^\[\[([^\]|#]+)(#[^\]|]*)?(?:\|([^\]]*))?\]\]$/;
@@ -2198,7 +2410,8 @@ export default class FullBacklinksPlugin extends Plugin {
             attr: { "data-href": target },
           });
         } else if (key === "tags" || key === "tag") {
-          cell.createSpan({ cls: "tag", text: "#" + v.replace(/^#/, "") });
+          // a string of tags ("a, b" or "a b") is several
+          for (const t of parseFrontMatterTags({ tags: v }) ?? []) cell.createSpan({ cls: "tag", text: t });
         } else {
           cell.createSpan({ text: v });
         }
@@ -2251,7 +2464,8 @@ export default class FullBacklinksPlugin extends Plugin {
       }),
     );
     this.rerenderNoteEmbeds();
-    // on unload, once the patch is off (unload order isn't guaranteed): Obsidian's embeds come back
+    // on unload Obsidian's embeds come back: redrawn once the whole unload is done (the patch, and this plugin's
+    // event handlers, are off by then), not halfway through it
     this.register(() => window.setTimeout(() => this.rerenderNoteEmbeds(), 0));
   }
 
@@ -2277,7 +2491,7 @@ export default class FullBacklinksPlugin extends Plugin {
     this.wireLinks(el);
     let opened = this.embedOpen.get(ctx.sourcePath);
     if (!opened) this.embedOpen.set(ctx.sourcePath, (opened = new Set()));
-    const card = this.buildCard(el, file, owner, opened, undefined, this.settings.embedFullPath);
+    const card = this.buildCard(el, file, owner, opened, undefined, this.settings.cardFullPath);
     // an embed inside a line (a list item, a sentence) is drawn inline there, not as a block of its own
     const mark = (tries: number) => {
       if (!el.isConnected) {
@@ -2290,7 +2504,7 @@ export default class FullBacklinksPlugin extends Plugin {
     // toggling the card isn't editing: the click mustn't reach Live Preview, which would put the cursor on the
     // embed's line and show its `![[…]]` source (the title link still navigates)
     const header = el.querySelector<HTMLElement>(":scope > .bfv-item > .bfv-item-header");
-    for (const type of ["mousedown", "click"] as const)
+    for (const type of ["mousedown", "click", "keydown"] as const)
       header?.addEventListener(type, e => {
         if (!(e.target as HTMLElement).closest("a")) e.stopPropagation();
       });
@@ -2341,18 +2555,46 @@ export default class FullBacklinksPlugin extends Plugin {
     for (const doc of docs)
       doc.querySelectorAll<HTMLElement>(".bfv-item > .bfv-item-header").forEach(h => {
         const f = this.app.vault.getAbstractFileByPath(h.parentElement?.dataset.bfvPath ?? "");
-        if (f instanceof TFile) this.setCardTitle(h, f, this.settings.embedFullPath);
+        if (f instanceof TFile) this.setCardTitle(h, f, this.settings.cardFullPath);
       });
   }
 
-  /** Redraws every open note so embeds follow the setting (and Obsidian's come back on unload). */
+  /** Whether a note has a whole-note `![[…]]` embed of a note: one this plugin draws as a card. */
+  private hasNoteEmbeds(file: TFile): boolean {
+    return (this.app.metadataCache.getFileCache(file)?.embeds ?? []).some(e => {
+      if (/[#^]/.test(e.link)) return false;
+      const dest = this.app.metadataCache.getFirstLinkpathDest(getLinkpath(e.link), file.path);
+      return dest?.extension === "md";
+    });
+  }
+
+  /**
+   * Redraws the open notes that have note embeds, so they follow the setting (and Obsidian's come back on unload):
+   * Reading view re-renders, an editing view is rebuilt (an internal, which also resets that editor's undo
+   * history). Notes without one are left alone. Open cards whose note has one render again.
+   */
   rerenderNoteEmbeds() {
+    if (!this.app.workspace.layoutReady) return; // nothing is drawn yet
     this.app.workspace.iterateAllLeaves(leaf => {
       const v = leaf.view;
-      if (!(v instanceof MarkdownView)) return;
+      if (!(v instanceof MarkdownView) || !v.file || !this.hasNoteEmbeds(v.file)) return;
       if (v.getMode() === "preview") v.previewMode.rerender(true);
       else leaf.rebuildView?.();
     });
+    for (const vs of this.views.values())
+      for (const st of [vs.base, ...vs.panes])
+        if (st) for (const it of st.items.values()) if (this.hasNoteEmbeds(it.file)) it.invalidate();
+  }
+
+  /** Unloads the cards of `bfv.embed` calls into plain elements once their element has left the page. */
+  private sweepLooseEmbeds() {
+    for (const x of this.looseEmbeds) {
+      if (x.wrap.isConnected) x.seen = true;
+      else if (x.seen) {
+        this.removeChild(x.owner);
+        this.looseEmbeds.delete(x);
+      }
+    }
   }
 
   // ---------- public API (for DataviewJS) ----------
@@ -2360,16 +2602,27 @@ export default class FullBacklinksPlugin extends Plugin {
   //   bfv.embed(dv, dv.pages('#project'));                    // full, collapsible notes
   //   bfv.embed(dv, dv.pages('"Inbox"'), { collapsed: true }); // start collapsed
   //   (bfv is a global alias of app.plugins.plugins["backlinks-full-view"].api)
+  //
+  // The cards belong to `opts.component`, else the DataviewJS block's (`dv.component`): they're unloaded with it.
+  // Into a plain element without a component they belong to the plugin until the element has left the page.
+  // An open card renders again when its note changes.
 
   api = {
     embed: (target: EmbedTarget, pages: unknown, opts: EmbedOptions = {}): HTMLElement => {
       const container: HTMLElement = isEl(target) ? target : target.container;
-      const parentComp: Component = (!isEl(target) && target.component) || this;
+      const given: Component | undefined = opts.component ?? (isEl(target) ? undefined : target.component);
       const sourcePath: string = opts.sourcePath ?? (isEl(target) ? undefined : target.currentFilePath) ?? "";
       const arr = pageList(pages);
 
       const wrap = container.createDiv({ cls: "bfv-embeds" });
       this.wireLinks(wrap);
+      this.sweepLooseEmbeds();
+      const owner = (given ?? this).addChild(new Component());
+      if (!given) this.looseEmbeds.add({ wrap, owner, seen: wrap.isConnected });
+      const cards = new Map<string, () => void>(); // path -> invalidate
+      const changed = (f: TAbstractFile) => cards.get(f.path)?.();
+      owner.registerEvent(this.app.vault.on("modify", changed));
+      owner.registerEvent(this.app.metadataCache.on("changed", changed));
 
       // Cycle guard: never embed a note that is already being rendered above us
       // (the note holding this block, or any card this block sits inside).
@@ -2403,7 +2656,7 @@ export default class FullBacklinksPlugin extends Plugin {
         total++;
         if (total > limit) continue; // counted, not rendered
         if (!opts.collapsed) opened.add(f.path); // bfv.embed() keeps opening cards unless asked not to
-        this.buildCard(wrap, f, parentComp, opened, undefined, this.settings.embedFullPath);
+        cards.set(f.path, this.buildCard(wrap, f, owner, opened, undefined, this.settings.cardFullPath).invalidate);
       }
       if (total > limit) {
         wrap.createDiv({

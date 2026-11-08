@@ -16,7 +16,9 @@ the whole rendered note, in panes below the note you're reading. It replaces the
   Preview. An embed in a list item or a sentence stays on its line.
 - **Canvas:** panes on note cards while editing, and in reading view for notes that opt in.
 - **DataviewJS:** `bfv.embed(dv, dv.pages('#project'))` renders full-note cards.
-- Works in Live Preview, Source mode and Reading view, in tabs, popout windows and on mobile.
+- Works in Live Preview, Source mode and Reading view, in tabs, sidebars and popout windows. It isn't marked
+  desktop-only, but it hasn't been tested on a phone or tablet.
+- Keyboard: Tab to a pane or card header, Enter or Space to expand or collapse it.
 
 ## Settings
 
@@ -36,7 +38,8 @@ Optional: Dataview, for query panes and `bfv.embed`.
 ## Notes
 
 Works on its own. With the optional [Editor Multiple Lanes](https://github.com/archit90/obsidian-editor-multiple-lanes)
-plugin, the panes also show under lane cards.
+plugin, the panes also show under lane cards (that plugin can turn them off there). How the two meet, and how other
+plugins can opt notes out (`data-bfv-skip`), is in `SPEC.md`, "Working with other plugins".
 
 Requires Obsidian 1.15 or later. It uses some Obsidian internals (checked against 1.15.0), so a new Obsidian
 version may need an update.
@@ -53,8 +56,19 @@ npm run deploy -- <vault> …      # build and copy into vaults that have the pl
 
 Releasing: `npm version patch` (or `minor` / `major`) bumps `package.json`, `manifest.json` and `versions.json` and
 tags the commit with the version; `git push --follow-tags` then runs the release workflow, which checks, builds and
-publishes the GitHub release BRAT installs from. End-to-end tests: see `TEST-CASES.md` and `SPEC.md`
-(Development).
+publishes the GitHub release BRAT installs from.
+
+End-to-end tests run in a throwaway Obsidian on a virtual display (Linux: Xvfb, ImageMagick, node 22+, and the
+Obsidian 1.15 AppImage, or `OBS_APP=<path>`), never in your own vaults:
+
+```sh
+npm run build && e2e/sandbox.sh reset 1 && npm run e2e       # alone, in a fresh vault
+e2e/sandbox.sh stop 1
+OBS_PLUGINS=blacksmithgu/obsidian-dataview@0.5.68:<folder of an Editor Multiple Lanes build> \
+  OBS_SANDBOX_DIR=$PWD/.sandbox-together e2e/sandbox.sh reset 1 && npm run e2e:together    # with them
+```
+
+The cases are in `TEST-CASES.md`; how the sandbox works is in `SPEC.md` (Development).
 
 ## Licence
 

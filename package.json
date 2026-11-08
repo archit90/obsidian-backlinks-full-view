@@ -10,6 +10,9 @@
   },
   "private": true,
   "main": "main.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc --noEmit && node esbuild.config.mjs",
     "dev": "node esbuild.config.mjs watch",
@@ -22,7 +25,10 @@
     "smoke": "node test/smoke.cjs",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run build && npm run smoke",
     "deploy": "npm run build && node scripts/deploy.mjs",
-    "version": "node scripts/version-bump.mjs && git add manifest.json versions.json"
+    "version": "node scripts/version-bump.mjs && git add manifest.json versions.json",
+    "e2e": "node e2e/run.mjs",
+    "e2e:together": "E2E_REQUIRE=dataview,editor-multiple-lanes RESULTS=results-together.md node e2e/run.mjs",
+    "sandbox": "e2e/sandbox.sh"
   },
   "dependencies": {
     "monkey-around": "^3.0.0"

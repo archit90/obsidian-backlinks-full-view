@@ -1,14 +1,44 @@
 // The end-to-end cases; ids match ../TEST-CASES.md. Each case gets the harness helpers (see run.mjs).
 const TARGET = "_bfv/Target.md";
+const HUB = "n/Maya Iyer.md"; // 3,000 backlinks (e2e/make-vault.mjs)
 const SRC = n => `_bfv/src/${n}.md`;
 const ALL10 = ["Alias", "Bad json", "Bad list", "Block", "Embed", "FmOnly", "Heading", "Mdlink", "Plain", "Unresolved"];
 const j = JSON.stringify;
 
 export function register(test, T) {
-  const { ev, check, eq, click, hover, typeInto, pick, panes, shown, open, expand, toggleCard, waitFor, sleep, read } =
-    T;
-  const leafCount = () =>
-    ev(`app.workspace.getLeavesOfType("markdown").filter(l => !l.view.containerEl.closest(".lanes-view")).length`);
+  const {
+    ev,
+    check,
+    eq,
+    click,
+    hover,
+    typeInto,
+    pick,
+    panes,
+    shown,
+    open,
+    expand,
+    toggleCard,
+    waitFor,
+    sleep,
+    read,
+    errors,
+  } = T;
+  const leafCount = () => ev(`app.workspace.getLeavesOfType("markdown").filter(l => !__t.inLanes(l)).length`);
+  // a plugin setting changed for a case, and put back to what it was after it
+  const withSetting = async (key, value, fn) => {
+    const was = await ev(`__t.plugin().settings[${j(key)}]`);
+    const set = v =>
+      ev(
+        `(async () => { const p = __t.plugin(); p.settings[${j(key)}] = ${j(v)}; await p.saveSettings(); return 1; })()`,
+      );
+    await set(value);
+    try {
+      return await fn();
+    } finally {
+      await set(was);
+    }
+  };
   const activePath = () => ev(`app.workspace.getActiveFile()?.path`);
   const replaceIn = (p, from, to) =>
     ev(`app.vault.process(app.vault.getAbstractFileByPath(${j(p)}), t => t.replace(${j(from)}, ${j(to)}))`);
@@ -221,9 +251,8 @@ export function register(test, T) {
           `(() => { const c = __t.card(1, ${j(SRC("Plain"))}); return [c.querySelector(".bfv-item-title").textContent, c.querySelector(".bfv-item-path")?.textContent.replace(/\u200E/g, "") ?? null, c.classList.contains("is-collapsed")]; })()`,
         );
       eq("full path (default)", await header(), ["_bfv/src/Plain", null, true]);
-      await ev(
-        `(() => { const p = __t.plugin(); p.settings.embedFullPath = false; p.applyCardTitles(); return 1; })()`,
-      );
+      const was = await ev(`__t.plugin().settings.cardFullPath`);
+      await ev(`(() => { const p = __t.plugin(); p.settings.cardFullPath = false; p.applyCardTitles(); return 1; })()`);
       await sleep(300);
       try {
         eq("setting off: name and folder", await header(), ["Plain", "_bfv/src/", true]);
@@ -238,7 +267,7 @@ export function register(test, T) {
         check("collapsed again", await ev(`__t.card(1, ${j(SRC("Plain"))}).classList.contains("is-collapsed")`));
       } finally {
         await ev(
-          `(async () => { const p = __t.plugin(); p.settings.embedFullPath = true; await p.saveSettings(); p.applyCardTitles(); return 1; })()`,
+          `(async () => { const p = __t.plugin(); p.settings.cardFullPath = ${j(was)}; await p.saveSettings(); p.applyCardTitles(); return 1; })()`,
         );
       }
       await sleep(300);
@@ -265,20 +294,31 @@ export function register(test, T) {
       eq("tags", r.tags, ["#alpha", "#beta/gamma"]);
       eq("list of links", r.links, ["_bfv/Target", "n/Maya Iyer"]);
       check("text rendered, read-only", r.text && r.noInput, r);
-      const own = await ev(`(async () => { await __t.open("_bfv/Open list.md"); return 1; })()`);
-      check("`backlinks` left out of a card's properties", own && true);
+      // Block holds backlinks-open and canvas-full-backlinks-enabled, Bad json only a `backlinks` list
+      await toggleCard(1, SRC("Block"));
+      await toggleCard(1, "_bfv/Bad json.md");
+      await sleep(600);
+      const own =
+        await ev(`(() => { const keys = p => [...__t.card(1, p).querySelectorAll(".bfv-prop-key")].map(k => k.textContent);
+        return [keys(${j(SRC("Block"))}), keys("_bfv/Bad json.md")]; })()`);
+      eq("this plugin's own keys left out of a card's properties", own, [["rank", "status", "created", "flag"], []]);
     },
   );
-  test("B3", "A Dataview block inside a card renders", async () => {
-    await open(TARGET);
-    await expand(1);
-    await toggleCard(1, SRC("Plain"));
-    const ok = await waitFor(
-      `__t.card(1, ${j(SRC("Plain"))})?.querySelectorAll(".bfv-item-content .dataview li").length === 2`,
-      5000,
-    );
-    check("dataview list rendered", ok);
-  });
+  test(
+    "B3",
+    "A Dataview block inside a card renders",
+    async () => {
+      await open(TARGET);
+      await expand(1);
+      await toggleCard(1, SRC("Plain"));
+      const ok = await waitFor(
+        `__t.card(1, ${j(SRC("Plain"))})?.querySelectorAll(".bfv-item-content .dataview li").length === 2`,
+        5000,
+      );
+      check("dataview list rendered", ok);
+    },
+    { needs: ["dataview"] },
+  );
   test("B4", "Card toggles are saved in `backlinks-open`, most recent first, 5 s later (not before)", async () => {
     await fresh();
     await open(TARGET);
@@ -314,7 +354,7 @@ export function register(test, T) {
     );
   });
   test("B7", "Only the 50 most recent expanded cards are saved", async () => {
-    const hub = "n/Maya Iyer.md";
+    const hub = HUB;
     const orig = await read(hub);
     try {
       await open(hub);
@@ -361,6 +401,7 @@ export function register(test, T) {
   );
   test("B11", '"Remembered expanded cards": only that many are saved; 0 saves none', async () => {
     await fresh();
+    const was = await ev(`__t.plugin().settings.maxOpen`);
     const set = n =>
       ev(`(async () => { const p = __t.plugin(); p.settings.maxOpen = ${n}; await p.saveSettings(); return 1; })()`);
     try {
@@ -380,7 +421,7 @@ export function register(test, T) {
       await sleep(600);
       eq("0: nothing written", await ev(`__t.fm(${j(TARGET)})["backlinks-open"] ?? null`), null);
     } finally {
-      await set(50);
+      await set(was);
     }
   });
   test("B12", "A `backlinks-open` that isn't a list of paths is flagged and left alone", async () => {
@@ -417,6 +458,34 @@ export function register(test, T) {
     const n = await ev(`__t.card(1, ${j(SRC("Embed"))}).querySelectorAll(".bfv-container, .bfv-panel").length`);
     eq("no panes nested inside the card", n, 0);
     check("embed rendered", await ev(`!!__t.card(1, ${j(SRC("Embed"))}).querySelector(".internal-embed")`));
+  });
+
+  test("B13", "Keyboard: pane and card headers are buttons; Enter or Space toggles the focused one", async () => {
+    await fresh();
+    await ev(`__t.closeAll()`);
+    await open(TARGET);
+    const state = () =>
+      ev(`(() => { const h = __t.pane(1).querySelector(".bfv-header"), c = __t.card(1, ${j(SRC("Plain"))})?.querySelector(".bfv-item-header");
+        const a = e => [e.getAttribute("role"), e.tabIndex, e.getAttribute("aria-expanded")];
+        return [a(h), c ? a(c) : null]; })()`);
+    eq("a pane header: a button, collapsed", (await state())[0], ["button", 0, "false"]);
+    await ev(`(() => { __t.pane(1).querySelector(".bfv-header").focus(); return 1; })()`);
+    await T.key("Enter");
+    await sleep(500);
+    const s1 = await state();
+    eq("Enter on the focused pane header: expanded", [s1[0][2], (await panes())[1].collapsed], ["true", false]);
+    eq("a card header: a button too, collapsed", s1[1], ["button", 0, "false"]);
+    await ev(`(() => { __t.card(1, ${j(SRC("Plain"))}).querySelector(".bfv-item-header").focus(); return 1; })()`);
+    await T.key("Space");
+    await sleep(500);
+    eq(
+      "Space on the focused card header: expanded",
+      [(await state())[1][2], (await panes())[1].items.find(i => i.path === SRC("Plain")).open],
+      ["true", true],
+    );
+    await T.key("Enter");
+    await sleep(400);
+    eq("Enter again: collapsed", (await state())[1][2], "false");
   });
 
   // ===== C. Links =====
@@ -460,13 +529,6 @@ export function register(test, T) {
       const split = await waitFor(
         `(() => { const l = app.workspace.getLeavesOfType("markdown").find(l => l.view.file?.path === ${j(SRC("Embed"))}); return !!l && l.parent !== __t.leaf.parent; })()`,
       );
-      if (!split)
-        console.log(
-          "DBG",
-          await ev(
-            `JSON.stringify({ls: app.workspace.getLeavesOfType("markdown").map(l => [l.view.file?.path, l.parent === __t.leaf.parent, l.view.containerEl.closest(".lanes-view") ? "lanes" : ""]), act: app.workspace.activeLeaf === __t.leaf, n: [...document.querySelectorAll(".popover")].length})`,
-          ),
-        );
       check("ctrl+alt: split", split);
     });
     test(`C3-${mode}`, `${label}: links inside a card resolve from the card's note; property links work`, async () => {
@@ -489,26 +551,31 @@ export function register(test, T) {
         `[...__t.card(1, ${j(SRC("Alias"))}).querySelectorAll(".bfv-props a.internal-link")].find(a => a.textContent.includes("Maya"))`,
       );
       await sleep(700);
-      eq("property link", await ev(`__t.leaf.view.file?.path`), "n/Maya Iyer.md");
+      eq("property link", await ev(`__t.leaf.view.file?.path`), HUB);
     });
-    test(`C4-${mode}`, `${label}: hovering with Ctrl shows a page preview; without it, none`, async () => {
-      await ev(`__t.closeAll()`);
-      await open(TARGET, mode);
-      await expand(1);
-      await hover(`__t.card(1, ${j(SRC("Heading"))}).querySelector(".bfv-item-title")`);
-      await sleep(900);
-      eq("plain hover", await ev(`document.querySelectorAll(".popover.hover-popover").length`), 0);
-      await T.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 500 });
-      await waitFor(`document.querySelectorAll(".popover.hover-popover").length === 0`, 2000);
-      await hover(`__t.card(1, ${j(SRC("Block"))}).querySelector(".bfv-item-title")`, { ctrl: true });
-      const ok = await waitFor(`document.querySelectorAll(".popover.hover-popover").length > 0`, 2500);
-      check("ctrl hover", ok);
-      await T.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 500 });
-      check(
-        "closes when the mouse leaves",
-        await waitFor(`document.querySelectorAll(".popover.hover-popover").length === 0`, 3000),
-      );
-    });
+    test(
+      `C4-${mode}`,
+      `${label}: hovering with Ctrl shows a page preview; without it, none`,
+      async () => {
+        await ev(`__t.closeAll()`);
+        await open(TARGET, mode);
+        await expand(1);
+        await hover(`__t.card(1, ${j(SRC("Heading"))}).querySelector(".bfv-item-title")`);
+        await sleep(900);
+        eq("plain hover", await ev(`document.querySelectorAll(".popover.hover-popover").length`), 0);
+        await T.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 500 });
+        await waitFor(`document.querySelectorAll(".popover.hover-popover").length === 0`, 2000);
+        await hover(`__t.card(1, ${j(SRC("Block"))}).querySelector(".bfv-item-title")`, { ctrl: true });
+        const ok = await waitFor(`document.querySelectorAll(".popover.hover-popover").length > 0`, 2500);
+        check("ctrl hover", ok);
+        await T.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 500 });
+        check(
+          "closes when the mouse leaves",
+          await waitFor(`document.querySelectorAll(".popover.hover-popover").length === 0`, 3000),
+        );
+      },
+      { needs: ["core:page-preview"] },
+    );
   }
   test("C5", "Ctrl+Alt+Shift-click opens a new window", async () => {
     await ev(`__t.closeAll()`);
@@ -538,6 +605,42 @@ export function register(test, T) {
     );
   });
 
+  test(
+    "C7",
+    "Hovering a card's links sends Page preview this plugin's hover source, the link and the card's note",
+    async () => {
+      await fresh();
+      await ev(`__t.closeAll()`);
+      await open(TARGET, "reading");
+      await expand(1);
+      await toggleCard(1, SRC("Plain"));
+      await sleep(400);
+      await ev(
+        `(() => { __t.hovers = []; __t.hoverRef = app.workspace.on("hover-link", e => __t.hovers.push([e.source, e.linktext, e.sourcePath, !!e.targetEl, !!e.hoverParent])); return 1; })()`,
+      );
+      try {
+        await hover(`__t.card(1, ${j(SRC("Heading"))}).querySelector(".bfv-item-title")`);
+        await sleep(200);
+        await hover(
+          `[...__t.card(1, ${j(SRC("Plain"))}).querySelectorAll(".bfv-item-content a.internal-link")].find(a => a.textContent === "lonely alias")`,
+        );
+        await sleep(300);
+        const got = await ev(`__t.hovers`);
+        eq(
+          "ours only (none from the note's own preview), per link",
+          [...new Map(got.map(h => [JSON.stringify(h), h])).values()],
+          [
+            ["backlinks-full-view", SRC("Heading"), SRC("Heading"), true, true],
+            ["backlinks-full-view", "_bfv/Lonely", SRC("Plain"), true, true],
+          ],
+        );
+      } finally {
+        await ev(`(() => { app.workspace.offref(__t.hoverRef); return 1; })()`);
+        await T.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 500 });
+      }
+    },
+  );
+
   // ===== D. Search =====
   const search = async (q, ft) => {
     await typeInto(`__t.pane(1).querySelector(".bfv-filter")`, q);
@@ -555,8 +658,13 @@ export function register(test, T) {
     eq("count", (await panes())[1].count, "2 / 10");
     eq("property value", await search("active"), ["Block", "Plain"]);
     eq("property key", await search("people"), ["Alias"]);
-    eq("path", await search("mdlink"), ["Mdlink"]);
+    eq("path (Block's backlinks-open lists Mdlink: not searched)", await search("mdlink"), ["Mdlink"]);
     eq("link in a property", await search("maya"), ["Alias"]);
+    eq(
+      "this plugin's own keys and pane settings aren't searched",
+      [await search("backlinks"), await search("broken")],
+      [[], []],
+    );
   });
   test("D2", "Search syntax: AND, OR, NOT, -word, phrases, parentheses, capitals only", async () => {
     eq("adjacent = AND", await search("alpha beta"), ["Plain"]);
@@ -619,6 +727,12 @@ export function register(test, T) {
     eq("written", f.children, [{ type: "rule", prop: "note.rank", op: ">", value: "5" }]);
   });
   test("E2", "Operators follow the property's type (date, boolean, list, text)", async () => {
+    const props = await ev(`[...${ruleSel(1, 0, "select.bfv-prop")}.querySelectorAll("option")].map(o => o.value)`);
+    check(
+      "the property list leaves this plugin's own keys out",
+      props.includes("note.flag") && !props.some(v => /^note\.(backlinks|canvas-full)/.test(v)),
+      props,
+    );
     await pick(ruleSel(1, 0, "select.bfv-prop"), "note.created");
     eq("date", await ops(1), [
       "is",
@@ -669,7 +783,7 @@ export function register(test, T) {
     );
     await pick(`${editor(1, "filter")}.querySelector("select")`, "or");
     await sleep(300);
-    eq("Any", (await shown(1)).length, 10 - 2 + 2 - 0 === 10 ? 10 : 10);
+    eq("Any: status empty OR name without bad = all", (await shown(1)).length, 10);
     eq(
       "button counts nested rules",
       await ev(`__t.pane(1).querySelectorAll(".bfv-tool-btn")[1].textContent`),
@@ -861,6 +975,48 @@ export function register(test, T) {
     eq("both kept", [bl.title, bl.query], ["Local", 'LIST FROM "_bfv/src"']);
   });
 
+  test(
+    "F8",
+    "Frontmatter that isn't valid YAML: an edit isn't saved, a notice says so; fixed, it's saved",
+    async () => {
+      await fresh();
+      await ev(`__t.closeAll()`);
+      const p = "_bfv/Bad yaml.md";
+      const before = await read(p);
+      await open(p);
+      await ev(`__t.clearNotices()`);
+      await errors();
+      await click(`__t.root().querySelector(".bfv-add")`);
+      await sleep(1500);
+      eq("file untouched", await read(p), before);
+      check(
+        "a notice says why",
+        (await ev(`__t.notices()`)).some(n => n.includes("couldn't save this note's pane settings")),
+        await ev(`__t.notices()`),
+      );
+      // logged once; Obsidian may log its own YAML complaint too
+      const errs = await errors();
+      check(
+        "logged once",
+        errs.filter(e => e.includes("couldn't save pane settings")).length === 1 &&
+          errs.every(e => e.includes("couldn't save pane settings") || /yaml/i.test(e)),
+        errs,
+      );
+      eq(
+        "the new pane stays",
+        (await panes()).map(x => x.title),
+        ["All backlinks", "Backlinks"],
+      );
+      await replaceIn(p, "[unclosed", "fixed");
+      check(
+        "saved once the YAML is fixed",
+        await waitFor(`JSON.stringify(__t.fm(${j(p)})?.backlinks) === "[{}]"`, 4000),
+        await read(p),
+      );
+      await ev(`__t.clearNotices()`);
+    },
+  );
+
   // ===== G. `backlinks-open`: pruning, renames, deletes =====
   test(
     "G1",
@@ -928,7 +1084,7 @@ export function register(test, T) {
     await fresh();
     await ev(`__t.closeAll()`);
     await open("_bfv/Lonely.md");
-    await expand(1 - 1);
+    await expand(0);
     await ev(`app.fileManager.renameFile(app.vault.getAbstractFileByPath("_bfv/Lonely.md"), "_bfv/Lonely2.md")`);
     await sleep(1200);
     eq("still its backlink", (await panes())[0].count, "1");
@@ -997,6 +1153,7 @@ export function register(test, T) {
     );
   });
   test("H3", "The panes are as wide as the note text, with and without Readable line length", async () => {
+    const was = await ev(`app.vault.getConfig("readableLineLength")`);
     for (const readable of [true, false]) {
       await ev(`(() => { app.vault.setConfig("readableLineLength", ${readable}); return 1; })()`);
       for (const mode of ["lp", "reading"]) {
@@ -1013,107 +1170,208 @@ export function register(test, T) {
         );
       }
     }
-    await ev(`(() => { app.vault.setConfig("readableLineLength", false); return 1; })()`);
+    await ev(`(() => { app.vault.setConfig("readableLineLength", ${j(was)}); return 1; })()`);
   });
 
-  // ===== I. Where the panes appear =====
-  const lanes = `app.plugins.plugins["editor-multiple-lanes"]`;
+  // ===== I. Where the panes appear: hosts of other plugins, and the contracts with them =====
+  // Editor Multiple Lanes, through its test API only: settings lanesOnly / showBacklinks with settingsChanged
+  // (T.lanes, which returns the old values), its view type "editor-lanes", and cards found by `.lanes-view`.
+  const LANES = "editor-multiple-lanes";
+  const laneLeaf = path =>
+    `(() => { let f = null; app.workspace.iterateAllLeaves(l => { if (!f && l.view?.file?.path === ${j(path)} && __t.inLanes(l)) f = l; }); return f; })()`;
+  const closeLanes = () =>
+    ev(`(() => { for (const l of app.workspace.getLeavesOfType("editor-lanes")) l.detach(); return 1; })()`);
+  /** Opens `path` in an Editor Multiple Lanes card ("lanes only" on meanwhile) and makes it __t.leaf. */
+  const inLanes = async (path, fn) => {
+    const was = await ev(`__t.lanes({ lanesOnly: true })`);
+    try {
+      await ev(`app.workspace.openLinkText(${j(path)}, "", false)`);
+      check("card leaf found", await waitFor(`!!(__t.leaf = ${laneLeaf(path)})`, 5000));
+      await fn();
+    } finally {
+      await ev(`__t.lanes(${j(was)})`);
+    }
+  };
   test(
     "I1",
-    "Editor Lanes card: panes under the note; cards and links work there",
+    "Editor Multiple Lanes card: panes under the note; cards and links work there",
+    async () => {
+      await fresh();
+      await ev(`__t.closeAll()`);
+      await closeLanes();
+      await inLanes(TARGET, async () => {
+        await waitFor(`!!__t.root()?.querySelector(".bfv-panel")`, 3000);
+        eq(
+          "panes",
+          (await panes()).map(p => [p.title, p.count]),
+          [
+            ["All backlinks", "10"],
+            ["Mine", "10"],
+          ],
+        );
+        await expand(1);
+        await toggleCard(1, SRC("Plain"));
+        check("card rendered", await waitFor(`__t.card(1, ${j(SRC("Plain"))}).textContent.includes("billing")`, 3000));
+        // where a link clicked in a card opens is Editor Multiple Lanes' routing: its own suite checks it
+        eq("cards carry their note's path", await ev(`__t.card(1, ${j(SRC("Plain"))}).dataset.bfvPath`), SRC("Plain"));
+      });
+    },
+    { needs: [LANES] },
+  );
+  test(
+    "I2",
+    "Editor Multiple Lanes 'Show backlinks panes under lane notes' off: no panes in lanes; on: back",
+    async () => {
+      await inLanes(TARGET, async () => {
+        await waitFor(`!!__t.root()?.querySelector(".bfv-panel")`, 3000);
+        const was = await ev(`__t.lanes({ showBacklinks: false })`);
+        try {
+          await sleep(1200);
+          eq("none in lanes", await ev(`document.querySelectorAll(".lanes-view .bfv-container").length`), 0);
+        } finally {
+          await ev(`__t.lanes(${j(was)})`);
+        }
+        await sleep(1200);
+        check("back", await ev(`document.querySelectorAll(".lanes-view .bfv-container").length > 0`));
+      });
+      await closeLanes();
+    },
+    { needs: [LANES] },
+  );
+  test("I3", "Every card carries data-bfv-path; a link in a card opens with that note as its source", async () => {
+    await fresh();
+    await ev(`__t.closeAll()`);
+    await open(TARGET);
+    await expand(1);
+    await toggleCard(1, SRC("Plain"));
+    await toggleCard(1, SRC("Embed"));
+    await sleep(500);
+    // pane cards, and the embed card inside Embed's card
+    const paths = await ev(
+      `[...__t.root().querySelectorAll(".bfv-item")].map(i => [i.dataset.bfvPath, !!app.vault.getAbstractFileByPath(i.dataset.bfvPath ?? "")])`,
+    );
+    check(
+      "every card has its note's path",
+      paths.length >= 11 && paths.every(([, ok]) => ok) && paths.some(([p]) => p === TARGET),
+      paths,
+    );
+    // what a partner gets: openLinkText(link, the card's note, how to open) instead of a link without a source
+    await ev(`(() => { const ws = app.workspace; __t.calls = []; __t.olt = [Object.prototype.hasOwnProperty.call(ws, "openLinkText"), ws.openLinkText];
+      ws.openLinkText = function (...a) { __t.calls.push(a.slice(0, 3)); return Promise.resolve(); }; return 1; })()`);
+    try {
+      await click(
+        `[...__t.card(1, ${j(SRC("Plain"))}).querySelectorAll(".bfv-item-content a.internal-link")].find(a => a.textContent === "lonely alias")`,
+      );
+      await click(`__t.card(1, ${j(SRC("Heading"))}).querySelector(".bfv-item-title")`, { ctrl: true });
+      eq("calls", await ev(`__t.calls`), [
+        ["_bfv/Lonely", SRC("Plain"), false],
+        [SRC("Heading"), SRC("Heading"), "tab"],
+      ]);
+    } finally {
+      await ev(
+        `(() => { const ws = app.workspace, [own, f] = __t.olt; if (own) ws.openLinkText = f; else delete ws.openLinkText; return 1; })()`,
+      );
+    }
+  });
+  test(
+    "I4",
+    "data-bfv-skip on an ancestor: hidden at once, no panes after the next refresh; removed: back",
+    async () => {
+      await fresh();
+      await ev(`__t.closeAll()`);
+      await open("_bfv/Short.md");
+      const tracked = () => ev(`__t.plugin().views.size`);
+      const n0 = await tracked();
+      await ev(`(() => { __t.leaf.containerEl.setAttribute("data-bfv-skip", "e2e"); return 1; })()`);
+      try {
+        eq("hidden by the CSS before any refresh", await ev(`getComputedStyle(__t.root()).display`), "none");
+        await ev(`(() => { app.workspace.trigger("layout-change"); return 1; })()`);
+        await sleep(800);
+        eq("no panes there, the view untracked", [await ev(`!!__t.root()`), await tracked()], [false, n0 - 1]);
+        const pad = await ev(
+          `(() => { const em = __t.view().editMode; return [Math.round(parseFloat(em.cm.contentDOM.style.paddingBottom)), Math.round(em.containerEl.clientHeight / 2)]; })()`,
+        );
+        check("the editor's own bottom padding back", Math.abs(pad[0] - pad[1]) <= 2, pad);
+      } finally {
+        await ev(
+          `(() => { __t.leaf.containerEl.removeAttribute("data-bfv-skip"); app.workspace.trigger("layout-change"); return 1; })()`,
+        );
+      }
+      check(
+        "attribute gone, layout-change: panes back",
+        await waitFor(`!!__t.root()?.querySelector(".bfv-panel")`, 3000),
+      );
+    },
+  );
+  test("I5", "A host that forces the editor's bottom padding keeps it: no room added under the panes", async () => {
+    await ev(`__t.closeAll()`);
+    await open("_bfv/Short.md");
+    const look = () =>
+      ev(
+        `(() => { const em = __t.view().editMode; em.updateBottomPadding(em.containerEl.clientHeight); return { min: __t.root().style.minHeight, pad: getComputedStyle(em.cm.contentDOM).paddingBottom }; })()`,
+      );
+    const before = await look();
+    check("normally the panes take the room to scroll past the end", parseFloat(before.min) > 0, before);
+    await ev(`(() => { const s = document.createElement("style"); s.id = "bfv-e2e-host"; s.textContent = ".bfv-e2e-host .cm-content { padding-bottom: 0 !important; }";
+      document.head.append(s); __t.view().containerEl.addClass("bfv-e2e-host"); return 1; })()`);
+    try {
+      eq("a host's own padding is kept, none added", await look(), { min: "", pad: "0px" });
+    } finally {
+      await ev(
+        `(() => { document.getElementById("bfv-e2e-host")?.remove(); __t.view().containerEl.removeClass("bfv-e2e-host"); return 1; })()`,
+      );
+    }
+    check("without it: the room is back", parseFloat((await look()).min) > 0);
+  });
+  const canvasNode = id => `__t.canvas.nodes.get(${j(id)})`;
+  const inCard = id =>
+    `(() => { const n = ${canvasNode(id)}; const d = n.nodeEl.querySelector("iframe")?.contentDocument; return (d && d.querySelector(".bfv-container")) || n.nodeEl.querySelector(".bfv-container"); })()`;
+  test(
+    "J1",
+    "Canvas file card: no panes in reading view; panes in the editor while editing",
     async () => {
       await fresh();
       await ev(`__t.closeAll()`);
       await ev(
-        `(async () => { ${lanes}.settings.lanesOnly = true; await ${lanes}.saveSettings(); await app.workspace.openLinkText(${j(TARGET)}, "", false); return 1; })()`,
+        `(async () => { const l = app.workspace.getLeaf("tab"); await l.openFile(app.vault.getAbstractFileByPath("_bfv/Canvas.canvas")); __t.canvasLeaf = l; __t.canvas = l.view.canvas; await __t.sleep(1500); return 1; })()`,
       );
-      await sleep(1500);
-      const leaf = await ev(
-        `(() => { let f = null; app.workspace.iterateAllLeaves(l => { if (l.view?.file?.path === ${j(TARGET)} && l.view.containerEl.closest(".lanes-view")) f = l; }); __t.leaf = f; return !!f; })()`,
+      eq("reading: none", await ev(`!!${inCard("c1")}`), false);
+      await ev(
+        `(async () => { const n = ${canvasNode("c1")}; __t.canvas.selectOnly(n); n.startEditing(); await __t.sleep(1500); return 1; })()`,
       );
-      check("card leaf found", leaf);
-      await waitFor(`!!__t.root()?.querySelector(".bfv-panel")`, 3000);
-      eq(
-        "panes",
-        (await panes()).map(p => [p.title, p.count]),
-        [
-          ["All backlinks", "10"],
-          ["Mine", "10"],
-        ],
+      const r = await ev(
+        `(() => { const root = ${inCard("c1")}; return root ? [root.ownerDocument !== document, root.parentElement.className, [...root.querySelectorAll(":scope > .bfv-panel .bfv-title")].map(t => t.textContent), root.classList.contains("interactive-child")] : null; })()`,
       );
-      await expand(1);
-      await toggleCard(1, SRC("Plain"));
-      check("card rendered", await waitFor(`__t.card(1, ${j(SRC("Plain"))}).textContent.includes("billing")`, 3000));
-      await click(`__t.card(1, ${j(SRC("Heading"))}).querySelector(".bfv-item-title")`);
-      await sleep(1200);
-      check(
-        "title link opened the note in a lane",
-        await ev(
-          `(() => { let ok = false; app.workspace.iterateAllLeaves(l => { if (l.view?.file?.path === ${j(SRC("Heading"))} && l.view.containerEl.closest(".lanes-view")) ok = true; }); return ok; })()`,
-        ),
-      );
+      eq("editing: in the iframe editor", r, [true, "cm-sizer", ["All backlinks", "Mine"], true]);
+      const css = await ev(`getComputedStyle(${inCard("c1")}.querySelector(".bfv-panel")).borderTopStyle`);
+      eq("styles relayed into the iframe", css, "solid");
     },
-    { needs: "editor-multiple-lanes" },
+    { needs: ["core:canvas"] },
   );
   test(
-    "I2",
-    "Editor Lanes 'Show backlinks panes under lane notes' off: no panes in lanes; on: back",
+    "J2",
+    "Canvas: expanding a pane and a card inside the edited card; clicks don't stop editing",
     async () => {
-      await ev(
-        `(async () => { ${lanes}.settings.showBacklinks = false; await ${lanes}.settingsChanged("backlinks"); return 1; })()`,
+      const root = inCard("c1");
+      const pt = await ev(
+        `(() => { const el = ${root}.querySelectorAll(":scope > .bfv-panel")[1].querySelector(".bfv-header"); el.scrollIntoView({ block: "center" }); const f = el.ownerDocument.defaultView.frameElement.getBoundingClientRect(); const b = el.getBoundingClientRect(); const z = f.width / el.ownerDocument.defaultView.innerWidth; return { x: f.left + (b.left + 30) * z, y: f.top + (b.top + b.height / 2) * z }; })()`,
       );
-      await sleep(1200);
-      eq("none in lanes", await ev(`document.querySelectorAll(".lanes-view .bfv-container").length`), 0);
-      await ev(
-        `(async () => { ${lanes}.settings.showBacklinks = true; await ${lanes}.settingsChanged("backlinks"); return 1; })()`,
+      await T.clickAt(pt.x, pt.y);
+      await sleep(700);
+      eq(
+        "pane expanded",
+        await ev(`!${root}.querySelectorAll(":scope > .bfv-panel")[1].classList.contains("is-collapsed")`),
+        true,
       );
-      await sleep(1200);
-      check("back", await ev(`document.querySelectorAll(".lanes-view .bfv-container").length > 0`));
-      await ev(`(async () => { ${lanes}.settings.lanesOnly = false; await ${lanes}.saveSettings(); return 1; })()`);
+      eq("still editing", await ev(`!!${canvasNode("c1")}.isEditing`), true);
+      eq(
+        "cards",
+        await ev(`${root}.querySelectorAll(":scope > .bfv-panel")[1].querySelectorAll(".bfv-item").length`),
+        10,
+      );
     },
-    { needs: "editor-multiple-lanes" },
+    { needs: ["core:canvas"] },
   );
-  const canvasNode = id => `__t.canvas.nodes.get(${j(id)})`;
-  const cardRoot = id =>
-    `(${canvasNode(id)}.nodeEl.querySelector("iframe")?.contentDocument ?? document).querySelector('.canvas-node[data-bfv-test="${id}"] .bfv-container, .bfv-container')`;
-  const inCard = id =>
-    `(() => { const n = ${canvasNode(id)}; const d = n.nodeEl.querySelector("iframe")?.contentDocument; return (d && d.querySelector(".bfv-container")) || n.nodeEl.querySelector(".bfv-container"); })()`;
-  test("J1", "Canvas file card: no panes in reading view; panes in the editor while editing", async () => {
-    await fresh();
-    await ev(`__t.closeAll()`);
-    await ev(
-      `(async () => { const l = app.workspace.getLeaf("tab"); await l.openFile(app.vault.getAbstractFileByPath("_bfv/Canvas.canvas")); __t.canvasLeaf = l; __t.canvas = l.view.canvas; await __t.sleep(1500); return 1; })()`,
-    );
-    eq("reading: none", await ev(`!!${inCard("c1")}`), false);
-    await ev(
-      `(async () => { const n = ${canvasNode("c1")}; __t.canvas.selectOnly(n); n.startEditing(); await __t.sleep(1500); return 1; })()`,
-    );
-    const r = await ev(
-      `(() => { const root = ${inCard("c1")}; return root ? [root.ownerDocument !== document, root.parentElement.className, [...root.querySelectorAll(":scope > .bfv-panel .bfv-title")].map(t => t.textContent), root.classList.contains("interactive-child")] : null; })()`,
-    );
-    eq("editing: in the iframe editor", r, [true, "cm-sizer", ["All backlinks", "Mine"], true]);
-    const css = await ev(`getComputedStyle(${inCard("c1")}.querySelector(".bfv-panel")).borderTopStyle`);
-    eq("styles relayed into the iframe", css, "solid");
-  });
-  test("J2", "Canvas: expanding a pane and a card inside the edited card; clicks don't stop editing", async () => {
-    const root = inCard("c1");
-    const pt = await ev(
-      `(() => { const el = ${root}.querySelectorAll(":scope > .bfv-panel")[1].querySelector(".bfv-header"); el.scrollIntoView({ block: "center" }); const f = el.ownerDocument.defaultView.frameElement.getBoundingClientRect(); const b = el.getBoundingClientRect(); const z = f.width / el.ownerDocument.defaultView.innerWidth; return { x: f.left + (b.left + 30) * z, y: f.top + (b.top + b.height / 2) * z }; })()`,
-    );
-    await T.clickAt(pt.x, pt.y);
-    await sleep(700);
-    eq(
-      "pane expanded",
-      await ev(`!${root}.querySelectorAll(":scope > .bfv-panel")[1].classList.contains("is-collapsed")`),
-      true,
-    );
-    eq("still editing", await ev(`!!${canvasNode("c1")}.isEditing`), true);
-    eq(
-      "cards",
-      await ev(`${root}.querySelectorAll(":scope > .bfv-panel")[1].querySelectorAll(".bfv-item").length`),
-      10,
-    );
-  });
   test(
     "J3",
     "Canvas: 'Enable in canvas' shows the panes in the card's reading view; 'Disable' removes them",
@@ -1146,34 +1404,32 @@ export function register(test, T) {
         [null, false],
       );
     },
+    { needs: ["core:canvas"] },
   );
   test(
     "J4",
     "Setting 'Show backlinks panes on canvas cards' off: none while editing, no canvas button anywhere",
     async () => {
-      await ev(
-        `(async () => { const p = __t.plugin(); p.settings.canvas = false; await p.saveSettings(); return 1; })()`,
-      );
-      await ev(
-        `(async () => { const n = ${canvasNode("c1")}; __t.canvas.selectOnly(n); n.startEditing(); await __t.sleep(1500); return 1; })()`,
-      );
-      eq("no panes while editing", await ev(`!!${inCard("c1")}`), false);
-      await open(TARGET);
-      eq(
-        "button hidden in a tab",
-        await ev(`__t.root().querySelector(".bfv-canvas-toggle").classList.contains("bfv-hidden")`),
-        true,
-      );
-      await ev(
-        `(async () => { const p = __t.plugin(); p.settings.canvas = true; await p.saveSettings(); return 1; })()`,
-      );
+      await withSetting("canvas", false, async () => {
+        await ev(
+          `(async () => { const n = ${canvasNode("c1")}; __t.canvas.selectOnly(n); n.startEditing(); await __t.sleep(1500); return 1; })()`,
+        );
+        eq("no panes while editing", await ev(`!!${inCard("c1")}`), false);
+        await open(TARGET);
+        eq(
+          "button hidden in a tab",
+          await ev(`__t.root().querySelector(".bfv-canvas-toggle").classList.contains("bfv-hidden")`),
+          true,
+        );
+      });
       await sleep(600);
       eq(
-        "button back",
+        "setting back on: button back",
         await ev(`__t.root().querySelector(".bfv-canvas-toggle").classList.contains("bfv-hidden")`),
         false,
       );
     },
+    { needs: ["core:canvas"] },
   );
   test("J5", "The same note in two splits: independent panes; a saved change shows in both", async () => {
     await fresh();
@@ -1229,19 +1485,24 @@ export function register(test, T) {
     );
     await ev(`(() => { __t.leaf.detach(); return 1; })()`);
   });
-  test("J8", "Page preview popover of a note: shows the note (panes aren't shown in popovers)", async () => {
-    await ev(`__t.closeAll()`);
-    await open("_bfv/src/Plain.md");
-    await hover(
-      `[...__t.view().contentEl.querySelectorAll(".cm-hmd-internal-link, a.internal-link")].find(a => a.textContent.includes("Target"))`,
-      { ctrl: true },
-    );
-    const ok = await waitFor(`!!document.querySelector(".popover.hover-popover .markdown-embed")`, 3000);
-    check("popover", ok);
-    eq("no panes in it", await ev(`document.querySelectorAll(".popover.hover-popover .bfv-container").length`), 0);
-    await T.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 500 });
-    await waitFor(`!document.querySelector(".popover.hover-popover")`, 3000);
-  });
+  test(
+    "J8",
+    "Page preview popover of a note: shows the note (panes aren't shown in popovers)",
+    async () => {
+      await ev(`__t.closeAll()`);
+      await open("_bfv/src/Plain.md");
+      await hover(
+        `[...__t.view().contentEl.querySelectorAll(".cm-hmd-internal-link, a.internal-link")].find(a => a.textContent.includes("Target"))`,
+        { ctrl: true },
+      );
+      const ok = await waitFor(`!!document.querySelector(".popover.hover-popover .markdown-embed")`, 3000);
+      check("popover", ok);
+      eq("no panes in it", await ev(`document.querySelectorAll(".popover.hover-popover .bfv-container").length`), 0);
+      await T.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 500 });
+      await waitFor(`!document.querySelector(".popover.hover-popover")`, 3000);
+    },
+    { needs: ["core:page-preview"] },
+  );
 
   // ===== K. Query panes =====
   test(
@@ -1273,55 +1534,231 @@ export function register(test, T) {
         [[SRC("Plain")], null],
       );
     },
+    { needs: ["dataview"] },
   );
-  test("K2", "Typing a query in a new pane: title becomes Query, results follow, the query is written", async () => {
-    await open(TARGET);
-    await click(`__t.root().querySelector(".bfv-add")`);
-    await sleep(600);
-    await typeInto(`__t.pane(2).querySelectorAll("input.bfv-query")[1]`, 'LIST FROM "_bfv/src" WHERE rank < 3');
-    await sleep(1500);
-    const p = await panes();
-    eq(
-      "title and cards",
-      [p[2].title, p[2].items.map(i => i.path).sort()],
-      ["Query · 2", [SRC("Block"), SRC("Heading")]],
-    );
-    eq("written", await ev(`__t.fm(${j(TARGET)}).backlinks[1].query`), 'LIST FROM "_bfv/src" WHERE rank < 3');
-  });
-  test("K3", "A query pane follows Dataview: a new matching note appears after it reindexes", async () => {
-    await ev(`app.vault.create("_bfv/src/Low.md", ${j("---\nrank: 0\n---\nlow")}).then(() => 1)`);
-    const ok = await waitFor(`__t.panes()[2].items.some(i => i.path === "_bfv/src/Low.md")`, 8000);
-    check("appeared", ok);
-  });
+  test(
+    "K2",
+    "Typing a query in a new pane: title becomes Query, results follow, the query is written",
+    async () => {
+      await open(TARGET);
+      await click(`__t.root().querySelector(".bfv-add")`);
+      await sleep(600);
+      await typeInto(`__t.pane(2).querySelectorAll("input.bfv-query")[1]`, 'LIST FROM "_bfv/src" WHERE rank < 3');
+      await sleep(1500);
+      const p = await panes();
+      eq(
+        "title and cards",
+        [p[2].title, p[2].items.map(i => i.path).sort()],
+        ["Query · 2", [SRC("Block"), SRC("Heading")]],
+      );
+      eq("written", await ev(`__t.fm(${j(TARGET)}).backlinks[1].query`), 'LIST FROM "_bfv/src" WHERE rank < 3');
+    },
+    { needs: ["dataview"] },
+  );
+  test(
+    "K3",
+    "A query pane follows Dataview: a new matching note appears after it reindexes",
+    async () => {
+      await ev(`app.vault.create("_bfv/src/Low.md", ${j("---\nrank: 0\n---\nlow")}).then(() => 1)`);
+      const ok = await waitFor(`__t.panes()[2].items.some(i => i.path === "_bfv/src/Low.md")`, 8000);
+      check("appeared", ok);
+    },
+    { needs: ["dataview"] },
+  );
+
+  // Dataview's side of query panes, simulated: K4 without it (a loaded Dataview is hidden from the plugin
+  // meanwhile), K5 with a stand-in answering as Dataview's API does
+  const dvHide = () =>
+    ev(`(() => { __t.realDv = app.plugins.plugins.dataview; delete app.plugins.plugins.dataview; return 1; })()`);
+  const dvBack = () =>
+    ev(`(() => { delete app.plugins.plugins.dataview; if (__t.realDv) { app.plugins.plugins.dataview = __t.realDv; app.metadataCache.trigger("dataview:index-ready"); }
+      __t.realDv = undefined; return 1; })()`);
+  test(
+    "K4",
+    "Without Dataview: a query pane says so, diagnostics too, and remembered cards aren't pruned",
+    async () => {
+      await fresh();
+      await ev(`__t.closeAll()`);
+      await dvHide();
+      try {
+        await open("_bfv/Queries.md");
+        await expand(1);
+        await sleep(400);
+        const p = await panes();
+        eq("the query pane", [p[1].count, p[1].empty], ["0", "Dataview plugin is not installed or enabled."]);
+        await ev(`__t.clearNotices()`);
+        await ev(`app.commands.executeCommandById("backlinks-full-view:diagnostics")`);
+        await sleep(300);
+        check(
+          "diagnostics",
+          (await ev(`__t.notices()`)).some(n => n.includes("Dataview: not enabled")),
+        );
+        await ev(`__t.clearNotices()`);
+        await sleep(5600);
+        eq(
+          "nothing pruned or written",
+          [
+            await ev(`__t.fm("_bfv/Queries.md").backlinks[3].open`),
+            await ev(`__t.fm("_bfv/Queries.md")["backlinks-open"] ?? null`),
+          ],
+          [[SRC("Plain")], null],
+        );
+      } finally {
+        await dvBack();
+      }
+    },
+  );
+  test(
+    "K5",
+    "A stand-in Dataview: results, no rows, an error, rows without links; it gets the query and the note; re-runs once its index is quiet",
+    async () => {
+      await fresh();
+      await ev(`__t.closeAll()`);
+      await dvHide();
+      await ev(`(() => {
+        const L = p => ({ path: p, type: "file" });
+        __t.dvCalls = [];
+        __t.dvAnswers = {
+          'LIST FROM "_bfv/src" SORT file.name': { successful: true, value: { type: "list", values: [L("_bfv/src/Plain.md"), L("_bfv/src/Block.md")] } },
+          'LIST FROM "_bfv/src" WHERE rank > 1000': { successful: true, value: { type: "list", values: [] } },
+          "LIST FROM WHERE (((": { successful: false, error: "stand-in parse error" },
+          'TABLE WITHOUT ID rank FROM "_bfv/src"': { successful: true, value: { type: "table", values: [[3], [1]] } },
+        };
+        app.plugins.plugins.dataview = { manifest: { version: "stand-in" }, index: { initialized: true },
+          api: { query: async (q, origin) => { __t.dvCalls.push([q, origin]); return __t.dvAnswers[q] ?? { successful: false, error: "unknown query" }; } } };
+        app.metadataCache.trigger("dataview:index-ready");
+        return 1; })()`);
+      try {
+        await open("_bfv/Queries.md");
+        for (let i = 1; i <= 4; i++) await expand(i);
+        await sleep(600);
+        const p = await panes();
+        eq("results, as cards", [p[1].count, p[1].items.map(i => i.path)], ["2", [SRC("Block"), SRC("Plain")]]);
+        eq("no rows", [p[2].count, p[2].empty], ["0", "No notes."]);
+        eq("an error", p[3].empty, "Dataview: stand-in parse error");
+        check("rows without note links: the hint", p[4].empty.includes("no note links"), p[4].empty);
+        check(
+          "asked with the query and the pane's note",
+          (await ev(`__t.dvCalls`)).some(
+            ([q, o]) => q === 'LIST FROM "_bfv/src" SORT file.name' && o === "_bfv/Queries.md",
+          ),
+        );
+        await ev(`(() => { __t.dvAnswers['LIST FROM "_bfv/src" SORT file.name'].value.values.push({ path: "_bfv/src/Heading.md", type: "file" });
+          app.metadataCache.trigger("dataview:metadata-change"); return 1; })()`);
+        await sleep(1000);
+        eq("not while Dataview is still reindexing", (await panes())[1].count, "2");
+        check("re-run once it's quiet (2.5 s)", await waitFor(`__t.panes()[1].count === "3"`, 5000));
+      } finally {
+        await dvBack();
+      }
+    },
+  );
 
   // ===== L. DataviewJS =====
-  test("L1", "bfv.embed: open cards, collapsed with a limit, the note itself skipped", async () => {
-    await fresh();
-    await ev(`__t.closeAll()`);
-    await ev(
-      `(async () => { const d = app.plugins.plugins.dataview; __t.dvjs = d.settings.enableDataviewJs; d.settings.enableDataviewJs = true; await d.saveSettings?.(); return 1; })()`,
-    );
-    await open("_bfv/DVJS.md", "reading");
-    const pv = `__t.view().previewMode.containerEl`;
-    await waitFor(
-      `(${pv}.querySelector(".markdown-preview-view").scrollTop = 1e6) && ${pv}.querySelectorAll(".bfv-embeds").length === 3`,
-      6000,
-    );
-    const r = await ev(
-      `[...${pv}.querySelectorAll(".bfv-embeds")].map(w => [w.querySelectorAll(":scope > .bfv-item").length, w.querySelectorAll(":scope > .bfv-item:not(.is-collapsed)").length, w.querySelector(":scope > .bfv-empty")?.textContent ?? ""])`,
-    );
-    eq("blocks", r, [
-      [8, 8, ""],
-      [2, 0, "Showing 2 of 8 notes. Pass { limit: N } to show more."],
-      [0, 0, "No notes to embed."],
-    ]);
-    await click(`${pv}.querySelector(".bfv-embeds .bfv-item-title")`);
-    await sleep(700);
-    eq("title link navigates", await ev(`__t.leaf.view.file?.path`), SRC("Alias"));
-    await ev(
-      `(async () => { const d = app.plugins.plugins.dataview; d.settings.enableDataviewJs = __t.dvjs; await d.saveSettings?.(); return 1; })()`,
-    );
-  });
+  test(
+    "L1",
+    "bfv.embed: open cards, collapsed with a limit, the note itself skipped",
+    async () => {
+      await fresh();
+      await ev(`__t.closeAll()`);
+      await ev(
+        `(async () => { const d = app.plugins.plugins.dataview; __t.dvjs = d.settings.enableDataviewJs; d.settings.enableDataviewJs = true; await d.saveSettings?.(); return 1; })()`,
+      );
+      await open("_bfv/DVJS.md", "reading");
+      const pv = `__t.view().previewMode.containerEl`;
+      await waitFor(
+        `(${pv}.querySelector(".markdown-preview-view").scrollTop = 1e6) && ${pv}.querySelectorAll(".bfv-embeds").length === 3`,
+        6000,
+      );
+      const r = await ev(
+        `[...${pv}.querySelectorAll(".bfv-embeds")].map(w => [w.querySelectorAll(":scope > .bfv-item").length, w.querySelectorAll(":scope > .bfv-item:not(.is-collapsed)").length, w.querySelector(":scope > .bfv-empty")?.textContent ?? ""])`,
+      );
+      eq("blocks", r, [
+        [8, 8, ""],
+        [2, 0, "Showing 2 of 8 notes. Pass { limit: N } to show more."],
+        [0, 0, "No notes to embed."],
+      ]);
+      await click(`${pv}.querySelector(".bfv-embeds .bfv-item-title")`);
+      await sleep(700);
+      eq("title link navigates", await ev(`__t.leaf.view.file?.path`), SRC("Alias"));
+      await ev(
+        `(async () => { const d = app.plugins.plugins.dataview; d.settings.enableDataviewJs = __t.dvjs; await d.saveSettings?.(); return 1; })()`,
+      );
+    },
+    { needs: ["dataview"] },
+  );
+
+  test(
+    "L2",
+    "bfv.embed called directly: an element or a dv-like target, every form of pages, open or collapsed, a limit, the note and its ancestors skipped, the depth limit",
+    async () => {
+      await fresh();
+      await ev(`__t.closeAll()`);
+      await open("_bfv/Short.md", "reading");
+      const r = await ev(`(() => {
+        const Component = __t.Component();
+        const host = __t.view().contentEl.createDiv({ cls: "bfv-e2e-embeds" });
+        const look = w => [w.querySelectorAll(":scope > .bfv-item").length, w.querySelectorAll(":scope > .bfv-item:not(.is-collapsed)").length,
+          w.querySelector(":scope > .bfv-empty")?.textContent ?? "", [...w.querySelectorAll(":scope > .bfv-item")].map(i => i.dataset.bfvPath)];
+        const comp = new Component(); comp.load(); __t.l2comp = comp;
+        const out = {
+          element: look(bfv.embed(host.createDiv(), ["_bfv/src/Plain.md", "_bfv/src/Heading"])),
+          dvLike: look(bfv.embed({ container: host.createDiv(), component: comp, currentFilePath: "_bfv/src/Plain.md" },
+            { values: [{ file: { path: "_bfv/src/Plain.md" } }, { path: "_bfv/src/Block.md" }, "_bfv/src/Heading.md"] }, { collapsed: true, limit: 1 })),
+          set: look(bfv.embed(host.createDiv(), new Set(["_bfv/src/Block.md"]))),
+          none: look(bfv.embed(host.createDiv(), [])),
+        };
+        const anc = host.createDiv({ attr: { "data-bfv-path": "_bfv/src/Block.md" } });
+        out.ancestor = look(bfv.embed(anc.createDiv(), ["_bfv/src/Block.md", "_bfv/src/Embed.md"]));
+        let deep = host;
+        for (const p of ["_bfv/src/Alias.md", "_bfv/src/Mdlink.md", "_bfv/src/FmOnly.md"]) deep = deep.createDiv({ attr: { "data-bfv-path": p } });
+        out.deep = look(bfv.embed(deep.createDiv(), ["_bfv/src/Plain.md"]));
+        return out; })()`);
+      eq("an element; paths and a link path: open cards", r.element, [2, 2, "", [SRC("Plain"), SRC("Heading")]]);
+      eq("a dv-like target: its note skipped, collapsed, limit 1", r.dvLike, [
+        1,
+        0,
+        "Showing 1 of 2 notes. Pass { limit: N } to show more.",
+        [SRC("Block")],
+      ]);
+      eq("a Set", r.set, [1, 1, "", [SRC("Block")]]);
+      eq("no notes", r.none, [0, 0, "No notes to embed.", []]);
+      eq("a note a card above shows is skipped", r.ancestor, [1, 1, "", [SRC("Embed")]]);
+      eq("embeds 3 deep: the limit", r.deep, [0, 0, "Embed depth limit reached.", []]);
+    },
+  );
+  test(
+    "L3",
+    "bfv.embed cards: an open one renders again when its note changes; unloaded with their component; a plain element's let go once it's gone",
+    async () => {
+      // L2's embeds are still open in Short
+      await replaceIn(SRC("Plain"), "billing v2 acme", "billing v2 acme L3-CHANGED");
+      check(
+        "the open card renders again",
+        await waitFor(
+          `[...document.querySelectorAll(".bfv-e2e-embeds .bfv-item")].some(i => i.dataset.bfvPath === ${j(SRC("Plain"))} && i.textContent.includes("L3-CHANGED"))`,
+          4000,
+        ),
+      );
+      await ev(`(() => { const Component = __t.Component(); const c = new Component(); c.load(); __t.l3comp = c;
+        bfv.embed({ container: document.querySelector(".bfv-e2e-embeds").createDiv({ cls: "bfv-e2e-l3" }), component: c }, [${j(SRC("Heading"))}]); return 1; })()`);
+      await sleep(600);
+      await ev(`(() => { __t.l3comp.unload(); return 1; })()`);
+      await replaceIn(SRC("Heading"), "words.", "words. L3-AFTER");
+      await sleep(1500);
+      check(
+        "unloaded with its component: it no longer renders",
+        !(await ev(`document.querySelector(".bfv-e2e-l3").textContent.includes("L3-AFTER")`)),
+      );
+      await ev(
+        `(() => { __t.l2comp.unload(); document.querySelector(".bfv-e2e-embeds").remove(); bfv.embed(document.createElement("div"), []); return 1; })()`,
+      );
+      check(
+        "a removed element's cards are let go on the next call",
+        await ev(`[...__t.plugin().looseEmbeds].every(x => x.wrap.isConnected || !x.seen)`),
+      );
+    },
+  );
 
   // ===== M. Commands, settings, lifecycle =====
   test("M1", "Show diagnostics", async () => {
@@ -1331,6 +1768,7 @@ export function register(test, T) {
     await sleep(300);
     const n = (await ev(`__t.notices()`)).find(t => t.includes("Backlinks Full View diagnostics")) ?? "";
     check("notice", n.includes("Panes: 1 + All backlinks") && n.includes("Note views tracked"), n);
+    check("every Obsidian internal it relies on is there", /Obsidian internals: ok \(\d+ checked\)/.test(n), n);
     await ev(`__t.clearNotices()`);
   });
   test("M2", "Disabling the plugin removes every pane and the global; enabling brings them back", async () => {
@@ -1381,33 +1819,97 @@ export function register(test, T) {
     },
   );
 
+  test(
+    "M5",
+    "Disabling leaves nothing of the plugin on the views that stay open (enabled and disabled again)",
+    async () => {
+      await fresh();
+      await ev(`__t.closeAll()`);
+      await open(TARGET);
+      await ev(`(async () => { const l = app.workspace.getLeaf("split"); await l.openFile(app.vault.getAbstractFileByPath("_bfv/Canvas.canvas"));
+        __t.m5 = [__t.leaf.view, l.view]; await __t.sleep(1500); return 1; })()`);
+      const id = j("backlinks-full-view");
+      const counts = () => ev(`__t.m5.map(v => [v._children?.length ?? -1, v._events?.length ?? -1])`);
+      await ev(`(async () => { await app.plugins.disablePlugin(${id}); await __t.sleep(500); return 1; })()`);
+      const before = await counts();
+      check(
+        "a view's components and hooks can be counted",
+        before.flat().every(n => n >= 0),
+        before,
+      );
+      await ev(`(async () => { await app.plugins.enablePlugin(${id}); await __t.sleep(1500); return 1; })()`);
+      eq(
+        "hooked while loaded",
+        await ev(`[__t.plugin().viewHooks.has(__t.m5[0]), __t.plugin().canvasHooks.has(__t.m5[1])]`),
+        [true, true],
+      );
+      await ev(`(async () => { await app.plugins.disablePlugin(${id}); await __t.sleep(500); return 1; })()`);
+      eq("enabled and disabled again: the views are as before", await counts(), before);
+      await ev(`(async () => { await app.plugins.enablePlugin(${id}); await __t.sleep(1500); return 1; })()`);
+      await ev(`(() => { for (const l of app.workspace.getLeavesOfType("canvas")) l.detach(); return 1; })()`);
+      await sleep(300);
+      eq("a closed canvas is let go", await ev(`__t.plugin().canvasHooks.size`), 0);
+      check("panes back", await waitFor(`!!__t.root()?.querySelector(".bfv-panel")`, 4000));
+    },
+    { needs: ["core:canvas"] },
+  );
+  test("M6", "A view whose refresh fails doesn't stop the others", async () => {
+    await fresh();
+    await ev(`__t.closeAll()`);
+    await open(TARGET);
+    await ev(`(__t.m6a = __t.leaf) && 1`);
+    await open("_bfv/Lonely.md", "lp", "split");
+    await errors();
+    await ev(`(() => { const p = __t.plugin(), a = __t.m6a.view; let thrown = false;
+      p.observeView = function (v) { if (!thrown && v === a) { thrown = true; throw new Error("e2e: a view that fails"); }
+        return Object.getPrototypeOf(this).observeView.call(this, v); };
+      return 1; })()`);
+    try {
+      await open("_bfv/Orphan.md", "lp", "same");
+      check(
+        "the other view still got its panes",
+        await waitFor(`__t.plugin().views.get(__t.leaf.view)?.notePath === "_bfv/Orphan.md"`, 3000),
+      );
+      const errs = await errors();
+      check(
+        "the failure is logged",
+        errs.some(e => e.includes("refresh failed") && e.includes("e2e: a view that fails")),
+        errs,
+      );
+    } finally {
+      await ev(`(() => { delete __t.plugin().observeView; return 1; })()`);
+    }
+  });
+
   // ===== N. Big notes =====
   const ms = async expr =>
     ev(`(async () => { const t = performance.now(); await (${expr}); return Math.round(performance.now() - t); })()`);
+  // time limits scale with BFV_PERF_SCALE (T.perf), for slower machines
+  const under = (what, t, limit) => check(`${what}: ${t} ms (< ${T.perf(limit)})`, t < T.perf(limit));
   test("N1", "A hub with 3,000 backlinks: open, expand All backlinks, search, full text", async () => {
     await ev(`__t.closeAll()`);
-    const tOpen = await ms(`__t.open("n/Maya Iyer.md")`);
-    check(`open with panes ready: ${tOpen} ms (< 2500)`, tOpen < 2500);
-    eq("count (3,000 stress notes + Alias)", (await panes())[0].count, "3001");
+    const tOpen = await ms(`__t.open(${j(HUB)})`);
+    under("open with panes ready", tOpen, 2500);
+    eq("count (3,000 log notes + Alias)", (await panes())[0].count, "3001");
     const tExp = await ms(
       `(async () => { __t.pane(0).querySelector(".bfv-header").click(); await __t.sleep(0); return 1; })()`,
     );
-    await waitFor(`__t.panes()[0].items.length === 3000`, 5000);
-    check(`expand 3,000 cards: ${tExp} ms (< 1500)`, tExp < 1500);
+    check("3,001 cards", await waitFor(`__t.panes()[0].items.length === 3001`, 5000));
+    under("expand 3,001 cards", tExp, 1500);
     const tSearch = await ms(
       `(async () => { const i = __t.pane(0).querySelector(".bfv-filter"); i.value = "standup"; i.dispatchEvent(new Event("input")); await __t.sleep(160); return 1; })()`,
     );
-    check(`search: ${tSearch} ms (< 600)`, tSearch < 600);
+    under("search", tSearch, 600);
     const tFt = await ms(
       `(async () => { __t.pane(0).querySelector(".bfv-fulltext input").click(); for (let k = 0; k < 100 && /Reading/.test(__t.panes()[0].count); k++) await __t.sleep(50); return 1; })()`,
     );
-    check(`full text over 3,000 notes: ${tFt} ms (< 5000)`, tFt < 5000);
+    under("full text over 3,001 notes", tFt, 5000);
     const r = (await panes())[0].count;
     check("a result count", /^\d+ \/ 3001$/.test(r), r);
     const tLogs = await ms(
       `(async () => { __t.pane(1).querySelector(".bfv-header").click(); await __t.sleep(0); return 1; })()`,
     );
-    check(`expand the filtered Logs pane: ${tLogs} ms (< 1500)`, tLogs < 1500);
+    under("expand the filtered Logs pane", tLogs, 1500);
   });
   test("N2", "Typing in a hub note with its big pane open stays responsive", async () => {
     await click(`__t.view().contentEl.querySelector(".cm-content .cm-line:last-child")`);
@@ -1415,12 +1917,12 @@ export function register(test, T) {
     const t0 = Date.now();
     for (const ch of "quick typing test") await T.type(ch);
     const dt = Date.now() - t0;
-    check(`17 keystrokes in ${dt} ms (< 1500)`, dt < 1500);
+    under("17 keystrokes", dt, 1500);
     await sleep(2500);
     const lag = await ms(`new Promise(r => requestAnimationFrame(() => r(1)))`);
-    check(`frame after autosave + refresh: ${lag} ms (< 200)`, lag < 200);
+    under("frame after autosave + refresh", lag, 200);
     await ev(
-      `(async () => { const f = app.vault.getAbstractFileByPath("n/Maya Iyer.md"); await app.vault.process(f, t => t.replace("quick typing test", "")); return 1; })()`,
+      `(async () => { const f = app.vault.getAbstractFileByPath(${j(HUB)}); await app.vault.process(f, t => t.replace("quick typing test", "")); return 1; })()`,
     );
   });
 
@@ -1477,14 +1979,15 @@ export function register(test, T) {
         eq("card border", s.border, "solid");
         const setFull = v =>
           ev(
-            `(async () => { const p = __t.plugin(); p.settings.embedFullPath = ${v}; await p.saveSettings(); p.applyCardTitles(); await __t.sleep(300); return 1; })()`,
+            `(async () => { const p = __t.plugin(); p.settings.cardFullPath = ${v}; await p.saveSettings(); p.applyCardTitles(); await __t.sleep(300); return 1; })()`,
           );
+        const was = await ev(`__t.plugin().settings.cardFullPath`);
         try {
           await setFull(false);
           const n = await embState();
           eq("setting off: name and folder label", [n.title, n.folder], ["Target", "_bfv/emb/"]);
         } finally {
-          await setFull(true);
+          await setFull(was);
         }
         eq("setting on again: full path", (await embState()).title, "_bfv/emb/Target");
         check("nothing rendered while collapsed", !s.body && s.props === null, s);
@@ -1567,23 +2070,31 @@ export function register(test, T) {
   test("Q4", "A note embedding itself, and the setting off: Obsidian's embed; on again: cards", async () => {
     await fresh();
     await embFixtures();
+    await ev(`__t.closeAll()`);
     await open(EMB.self, "reading");
     await sleep(700);
     eq("self-embed is Obsidian's", (await embState()).cards, 0);
+    // a note without embeds, open in Live Preview: it isn't rebuilt when the setting changes
+    await open("_bfv/Short.md", "lp");
+    await ev(`(() => { __t.plain = [__t.leaf, __t.leaf.view]; return 1; })()`);
     await open(EMB.host, "reading");
     await sleep(600);
-    await ev(
-      `(async () => { const p = app.plugins.plugins["backlinks-full-view"]; p.settings.noteEmbeds = false; await p.saveSettings(); p.rerenderNoteEmbeds(); return 1; })()`,
-    );
+    const set = v =>
+      ev(
+        `(async () => { const p = app.plugins.plugins["backlinks-full-view"]; p.settings.noteEmbeds = ${v}; await p.saveSettings(); p.rerenderNoteEmbeds(); return 1; })()`,
+      );
+    const was = await ev(`__t.plugin().settings.noteEmbeds`);
+    try {
+      await set(false);
+      await sleep(1200);
+      const s = await embState();
+      eq("setting off: Obsidian's embeds", [s.cards, s.native], [0, ["_bfv/emb/Target", "_bfv/emb/Target#Sec"]]);
+    } finally {
+      await set(was);
+    }
     await sleep(1200);
-    let s = await embState();
-    eq("setting off: Obsidian's embeds", [s.cards, s.native], [0, ["_bfv/emb/Target", "_bfv/emb/Target#Sec"]]);
-    await ev(
-      `(async () => { const p = app.plugins.plugins["backlinks-full-view"]; p.settings.noteEmbeds = true; await p.saveSettings(); p.rerenderNoteEmbeds(); return 1; })()`,
-    );
-    await sleep(1200);
-    s = await embState();
-    eq("setting on: a card again", s.cards, 1);
+    eq("setting on: a card again", (await embState()).cards, 1);
+    check("a note without embeds wasn't rebuilt", await ev(`__t.plain[0].view === __t.plain[1]`));
   });
   test("Q5", "Disabling the plugin gives Obsidian's embeds back; enabling makes cards again", async () => {
     await fresh();
@@ -1605,18 +2116,72 @@ export function register(test, T) {
     );
     check("enabled: card again", on >= 1, on);
   });
-  test("Q6", "A canvas file card of a note isn't turned into a card", async () => {
-    await fresh();
-    await embFixtures();
-    const r =
-      await ev(`(async () => { const p = "_bfv/emb/c.canvas"; const d = JSON.stringify({ nodes: [{ id: "a", type: "file", file: ${j(EMB.target)}, x: 0, y: 0, width: 500, height: 400 }], edges: [] });
+  test(
+    "Q6",
+    "A canvas file card of a note isn't turned into a card",
+    async () => {
+      await fresh();
+      await embFixtures();
+      const r =
+        await ev(`(async () => { const p = "_bfv/emb/c.canvas"; const d = JSON.stringify({ nodes: [{ id: "a", type: "file", file: ${j(EMB.target)}, x: 0, y: 0, width: 500, height: 400 }], edges: [] });
       let f = app.vault.getAbstractFileByPath(p); if (f) await app.vault.modify(f, d); else f = await app.vault.create(p, d);
       const l = app.workspace.getLeaf("tab"); await l.openFile(f); await __t.sleep(2500);
       const el = l.view.containerEl; const node = el.querySelector(".canvas-node-content");
       const res = [node?.classList.contains("bfv-note-embed") || !!node?.querySelector('[data-bfv-path=${j(EMB.target)}]'), !!node?.textContent.includes("Body text of target"), node?.querySelectorAll('.bfv-note-embed [data-bfv-path=${j(EMB.inner)}]').length];
       l.detach(); return res; })()`);
-    eq("canvas file card: the note itself, no card wrapper; its ![[Inner]] is a card", r, [false, true, 1]);
-  });
+      eq("canvas file card: the note itself, no card wrapper; its ![[Inner]] is a card", r, [false, true, 1]);
+    },
+    { needs: ["core:canvas"] },
+  );
+
+  test(
+    "Q7",
+    "Editor Multiple Lanes card: an embedded note is a collapsed card; expanding shows its properties and the note",
+    async () => {
+      await fresh();
+      await embFixtures();
+      await ev(`__t.closeAll()`);
+      await closeLanes();
+      await inLanes(EMB.host, async () => {
+        const visibleRoot = `[...__t.view().containerEl.querySelectorAll(".markdown-reading-view, .markdown-source-view")].find(e => e.offsetParent)`;
+        check("a card for ![[Target]]", await waitFor(`!!${visibleRoot}?.querySelector(".bfv-note-embed")`, 5000));
+        const s = await embState();
+        eq("one card, collapsed", [s.cards, s.collapsed], [1, true]);
+        await click(embHeader);
+        await sleep(900);
+        const o = await embState();
+        check(
+          "expanded: its properties and the note",
+          o.collapsed === false && !!o.props?.includes("zettel") && o.body,
+          o,
+        );
+      });
+      await closeLanes();
+    },
+    { needs: [LANES] },
+  );
+  test(
+    "Q9",
+    "A note with Excalidraw's frontmatter key keeps Obsidian's own embed (Excalidraw draws those)",
+    async () => {
+      await fresh();
+      await embFixtures();
+      await ev(`(async () => { const mk = async (p, t) => { const f = app.vault.getAbstractFileByPath(p); if (f) await app.vault.modify(f, t); else await app.vault.create(p, t); };
+      await mk("_bfv/emb/Drawing.md", "---\\nexcalidraw-plugin: parsed\\n---\\n# Drawing\\n\\nText of the drawing.\\n");
+      await mk("_bfv/emb/DrawHost.md", "![[_bfv/emb/Drawing]]\\n\\n![[_bfv/emb/Inner]]\\n");
+      await __t.sleep(400); return 1; })()`);
+      await open("_bfv/emb/DrawHost.md", "reading");
+      await sleep(900);
+      // the visible mode only (the hidden editor may have drawn its embeds too)
+      const r =
+        await ev(`(() => { const root = [...__t.view().containerEl.querySelectorAll(".markdown-reading-view, .markdown-source-view")].find(e => e.offsetParent);
+      return [[...root.querySelectorAll(".bfv-note-embed .bfv-item")].map(i => i.dataset.bfvPath), !!root.querySelector('.internal-embed[src="_bfv/emb/Drawing"]:not(.bfv-note-embed)')]; })()`);
+      eq("only the plain note is a card; the drawing stays Obsidian's (or Excalidraw's) embed", r, [
+        ["_bfv/emb/Inner.md"],
+        true,
+      ]);
+    },
+  );
 
   // ===== P. Popout windows =====
   test("P1", "A note in a popout window: panes in its editor; panes, cards and links work there", async () => {

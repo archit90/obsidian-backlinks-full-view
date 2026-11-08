@@ -6,6 +6,7 @@ import {
   hasLegacyOpen,
   legacyOpen,
   listJson,
+  matchEntries,
   merge,
   mergeOpen,
   parseEntry,
@@ -149,19 +150,73 @@ describe("merge (three-way, per key)", () => {
     expect(out[0].cfg.title).toBe("A2");
     expect(out[0].cfg.query).toBe("LIST");
   });
-  it("takes our structure when only we added or removed panes", () => {
+  it("takes our structure when only we removed a pane, keeping keys the file changed", () => {
     const base = list("A", "B");
     const ours = [base[0]]; // B removed here
     const disk = [entry({ title: "A*" }, 0), entry({ title: "B" }, 1)];
-    expect(merge(base, ours, disk).map(e => e.cfg.title)).toEqual(["A"]);
+    expect(merge(base, ours, disk).map(e => e.cfg.title)).toEqual(["A*"]);
   });
-  it("keeps ours, detached from the file, when both sides changed the structure", () => {
+  it("keeps both sides' new panes when both added one", () => {
     const base = list("A");
     const ours = [...list("A"), entry({ title: "New" }, null)];
     const disk = list("A", "Other");
+    expect(merge(base, ours, disk).map(e => e.cfg.title)).toEqual(["A", "New", "Other"]);
+  });
+  it("applies an edit to the same pane when the file removed another one", () => {
+    // here: A renamed A2; in the file: A removed (B is now the first entry) and B given a query
+    const base = list("A", "B");
+    const ours = [entry({ title: "A2" }, 0), entry({ title: "B" }, 1)];
+    const disk = [entry({ title: "B", query: "LIST" }, 0)];
     const out = merge(base, ours, disk);
-    expect(out.map(e => e.cfg.title)).toEqual(["A", "New"]);
-    expect(out.every(e => e.src === null)).toBe(true);
+    // B keeps the file's query and isn't renamed; A, edited here, is kept (an edit wins over a removal)
+    expect(out.map(e => [e.cfg.title, e.cfg.query])).toEqual([
+      ["A2", ""],
+      ["B", "LIST"],
+    ]);
+  });
+  it("drops a pane the file removed when it wasn't edited here", () => {
+    const base = list("A", "B");
+    const ours = list("A", "B2");
+    const disk = [entry({ title: "B" }, 0)];
+    expect(merge(base, ours, disk).map(e => e.cfg.title)).toEqual(["B2"]);
+  });
+  it("keeps a change the file made to a pane when this view removed another one", () => {
+    const base = list("A", "B");
+    const ours = [list("A", "B")[1]]; // A removed here; B untouched (src 1)
+    const disk = [entry({ title: "A" }, 0), entry({ title: "B", query: "LIST" }, 1)];
+    const out = merge(base, ours, disk);
+    expect(out.map(e => [e.cfg.title, e.cfg.query])).toEqual([["B", "LIST"]]);
+  });
+  it("follows panes the file reordered", () => {
+    const base = list("A", "B");
+    const ours = list("A", "B");
+    ours[0].cfg.query = "LIST"; // A edited here
+    const disk = [entry({ title: "B" }, 0), entry({ title: "A" }, 1)];
+    expect(merge(base, ours, disk).map(e => [e.cfg.title, e.cfg.query])).toEqual([
+      ["B", ""],
+      ["A", "LIST"],
+    ]);
+  });
+  it("puts a pane added here after the pane it follows here", () => {
+    const base = list("A", "B");
+    const ours = [list("A", "B")[0], entry({ title: "New" }, null), list("A", "B")[1]];
+    const disk = [...list("A", "B"), entry({ title: "C" }, 2)];
+    expect(merge(base, ours, disk).map(e => e.cfg.title)).toEqual(["A", "New", "B", "C"]);
+  });
+  it("matches identical panes first, then the rest in order", () => {
+    const base = list("A", "B", "C");
+    expect(matchEntries(base, list("C", "A", "B"))).toEqual([1, 2, 0]);
+    expect(matchEntries(base, list("A", "B2", "C"))).toEqual([0, 1, 2]);
+    expect(matchEntries(base, list("B"))).toEqual([-1, 0, -1]);
+    expect(matchEntries(base, list("X", "Y"))).toEqual([-1, -1, -1]);
+    // the title tells a pane edited in the file from one removed there
+    expect(matchEntries(list("A", "B"), [entry({ title: "B", query: "LIST" }, 0)])).toEqual([-1, 0]);
+  });
+  it("merges both sides' edits of a pane the file also moved up", () => {
+    const base = list("A", "B");
+    const ours = [entry({ title: "A" }, 0), entry({ title: "B3" }, 1)];
+    const disk = [entry({ title: "B", query: "LIST" }, 0)];
+    expect(merge(base, ours, disk).map(e => [e.cfg.title, e.cfg.query])).toEqual([["B3", "LIST"]]);
   });
   it("listJson ignores raw spelling", () => {
     expect(listJson([entry({ sort: [{ prop: "file.name" }] })])).toBe(listJson([entry({})]));

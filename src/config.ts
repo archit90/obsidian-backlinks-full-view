@@ -19,14 +19,15 @@ export interface SortRule {
   prop: string;
   dir: "asc" | "desc";
 }
-export interface Settings {
+/** One pane's own settings: what a `backlinks` entry holds. */
+export interface PaneConfig {
   title: string;
   filter: Group;
   sorts: SortRule[];
   query: string;
 }
 
-export const defaults = (): Settings => ({
+export const defaults = (): PaneConfig => ({
   title: "", // pane heading; falls back to "Backlinks" or "Query"
   filter: { type: "group", mode: "and", children: [] },
   sorts: [{ prop: "file.name", dir: "asc" }],
@@ -36,14 +37,14 @@ export const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 
 /** One `backlinks:` entry as read from frontmatter. */
 export interface Entry {
-  cfg: Settings;
+  cfg: PaneConfig;
   raw: Record<string, unknown> | null; // the entry as written (kept so unknown keys survive a write)
   errors: string[]; // why parts of it couldn't be read; any error blocks writes for the note
   src: number | null; // index in the list it was read from (null: added in this session)
 }
 
-/** frontmatter key → the Settings field it holds */
-export const KEYS: [string, keyof Settings][] = [
+/** frontmatter key → the PaneConfig field it holds */
+export const KEYS: [string, keyof PaneConfig][] = [
   ["title", "title"],
   ["filter", "filter"],
   ["sort", "sorts"],
@@ -161,37 +162,99 @@ export function listJson(entries: Entry[]): string {
   return JSON.stringify(entries.map(e => [e.cfg, e.errors]));
 }
 
-/** `to[f] = clone(from[f])` for one Settings field, keeping the field's own type. */
-function copyField<K extends keyof Settings>(to: Settings, from: Settings, f: K) {
+/** `to[f] = clone(from[f])` for one PaneConfig field, keeping the field's own type. */
+function copyField<K extends keyof PaneConfig>(to: PaneConfig, from: PaneConfig, f: K) {
   to[f] = clone(from[f]);
 }
 
+const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const changedHere = (o: Entry, b: Entry) => KEYS.some(([, f]) => !sameJson(o.cfg[f], b.cfg[f]));
+
 /**
- * Three-way merge of this view's panes (`ours`) with the list on disk, against the list this view last
- * saw (`base`). Keys changed here win; everything else comes from disk. If both sides added or removed
- * panes, ours wins.
+ * Which entry of `disk` each entry of `base` is now (-1: gone from the file). Identical panes match first (the
+ * nearest one when there are several), then panes with the same title (when it's the only one left with it), then
+ * the rest in order when as many are left on both sides: panes edited in place.
+ */
+export function matchEntries(base: Entry[], disk: Entry[]): number[] {
+  const match = base.map(() => -1);
+  const used = new Set<number>();
+  const take = (i: number, j: number) => {
+    match[i] = j;
+    used.add(j);
+  };
+  base.forEach((b, i) => {
+    let best = -1;
+    disk.forEach((d, j) => {
+      if (used.has(j) || !sameJson(d.cfg, b.cfg)) return;
+      if (best < 0 || Math.abs(j - i) < Math.abs(best - i)) best = j;
+    });
+    if (best >= 0) take(i, best);
+  });
+  const rest = () => ({
+    base: base.map((_, i) => i).filter(i => match[i] < 0),
+    disk: disk.map((_, j) => j).filter(j => !used.has(j)),
+  });
+  const titled = rest();
+  for (const i of titled.base) {
+    const t = base[i].cfg.title;
+    if (!t || titled.base.filter(k => base[k].cfg.title === t).length > 1) continue;
+    const js = titled.disk.filter(j => disk[j].cfg.title === t);
+    if (js.length === 1 && !used.has(js[0])) take(i, js[0]);
+  }
+  const left = rest();
+  if (left.base.length === left.disk.length) left.base.forEach((i, k) => take(i, left.disk[k]));
+  return match;
+}
+
+/**
+ * Three-way merge of this view's panes (`ours`, each `src` an index into `base`) with the list on disk, against the
+ * list this view last read or wrote (`base`). Panes are matched between `base` and the file by `matchEntries`.
+ * - A pane kept here and still in the file: per key, a change made here wins, else the file's value; unknown keys
+ *   come from the file.
+ * - A pane removed here is removed from the file too.
+ * - A pane removed in the file stays removed, unless it was edited here: then the edit is kept.
+ * - Panes added here and panes added in the file are all kept. The file's order is kept, and a pane added here
+ *   goes after the pane it follows here.
  */
 export function merge(base: Entry[], ours: Entry[], disk: Entry[]): Entry[] {
-  const fromDisk = (o: Entry): Entry => {
-    const d = o.src !== null ? disk[o.src] : undefined;
-    return { ...o, raw: d ? d.raw : o.raw };
-  };
-  if (listJson(disk) === listJson(base)) return ours.map(fromDisk);
-  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-  const oursStructural = ours.length !== base.length || ours.some((o, i) => o.src !== i);
-  if (!oursStructural) {
-    return disk.map((d, i) => {
-      const o = ours[i],
-        b = base[i];
-      if (!o || !b) return d;
-      const cfg = clone(d.cfg);
-      for (const [, f] of KEYS) if (!same(o.cfg[f], b.cfg[f])) copyField(cfg, o.cfg, f);
-      return { cfg, raw: d.raw, errors: [], src: i };
+  if (listJson(disk) === listJson(base)) {
+    // only this view changed the list: ours, with the file's spelling and unknown keys
+    return ours.map(o => {
+      const d = o.src !== null ? disk[o.src] : undefined;
+      return { ...o, raw: d ? d.raw : o.raw };
     });
   }
-  if (disk.length === base.length) return ours.map(fromDisk); // only we changed the structure
-  console.warn("[backlinks-full-view] panes were added or removed both here and in the file; keeping this view's list");
-  return ours.map(o => ({ ...o, src: null }));
+  const match = matchEntries(base, disk);
+  const merged = new Map<number, Entry>(); // disk index -> the pane kept here, merged
+  const removedHere = new Set<number>(); // disk indexes of panes removed here
+  const lead: Entry[] = []; // panes of ours without a place in the file, before any that has one
+  const after = new Map<number, Entry[]>(); // ... and those following the pane at a disk index
+  base.forEach((_, i) => {
+    if (match[i] >= 0 && !ours.some(o => o.src === i)) removedHere.add(match[i]);
+  });
+  let anchor = -1;
+  for (const o of ours) {
+    const b = o.src !== null ? base[o.src] : undefined;
+    const j = o.src !== null ? (match[o.src] ?? -1) : -1;
+    if (b && j >= 0) {
+      const d = disk[j];
+      const cfg = clone(d.cfg);
+      for (const [, f] of KEYS) if (!sameJson(o.cfg[f], b.cfg[f])) copyField(cfg, o.cfg, f);
+      merged.set(j, { cfg, raw: d.raw, errors: [], src: j });
+      anchor = j;
+      continue;
+    }
+    if (b && !changedHere(o, b)) continue; // removed in the file, untouched here
+    const e: Entry = { ...o, errors: [], src: null };
+    if (anchor < 0) lead.push(e);
+    else after.set(anchor, [...(after.get(anchor) ?? []), e]);
+  }
+  const out: Entry[] = [...lead];
+  disk.forEach((d, j) => {
+    if (!removedHere.has(j)) out.push(merged.get(j) ?? { ...d, src: j });
+    out.push(...(after.get(j) ?? []));
+  });
+  return out;
 }
 
 /** The frontmatter value for one entry. Unchanged keys keep the user's own spelling; unknown keys are kept. */

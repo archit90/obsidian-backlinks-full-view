@@ -1,4 +1,5 @@
-// Reading property values: anything to strings, relative dates.
+// Reading property values: anything to strings, relative dates, a note's content properties.
+import { CONFIG_KEYS } from "./constants";
 
 export function toStrings(v: unknown): string[] {
   if (v === null || v === undefined) return [];
@@ -27,3 +28,35 @@ export function normDate(s: string): string {
   return t.slice(0, 10);
 }
 export const DATE_RE = /^\d{4}-\d{2}-\d{2}/;
+
+/** The frontmatter keys that are the note's content (in their order): the plugin's own keys left out. */
+export function contentKeys(fm: Record<string, unknown> | null | undefined): string[] {
+  return Object.keys(fm ?? {}).filter(k => !CONFIG_KEYS.has(k));
+}
+
+/** What search and filters read of a note's properties. */
+export interface NoteProps {
+  props: Record<string, string[]>; // lower-cased key -> values
+  labels: Record<string, string>; // lower-cased key -> key as written
+  lists: Set<string>; // lower-cased keys whose value is an array
+}
+
+/** A note's content properties as strings, keyed by lower-cased name (the first spelling labels it). */
+export function noteProps(fm: Record<string, unknown> | null | undefined): NoteProps {
+  const props: Record<string, string[]> = {};
+  const labels: Record<string, string> = {};
+  const lists = new Set<string>();
+  for (const k of contentKeys(fm)) {
+    const v = fm?.[k];
+    const lk = k.toLowerCase();
+    props[lk] = toStrings(v);
+    if (!(lk in labels)) labels[lk] = k;
+    if (Array.isArray(v)) lists.add(lk);
+  }
+  return { props, labels, lists };
+}
+
+/** A note's text without its frontmatter block (`fmEnd`: where the block ends, from the metadata cache). */
+export function noteBody(text: string, fmEnd: number | undefined): string {
+  return fmEnd !== undefined && fmEnd > 0 && fmEnd <= text.length ? text.slice(fmEnd) : text;
+}

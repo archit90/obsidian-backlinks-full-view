@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { localIso, normDate, toStrings } from "./values";
+import { contentKeys, localIso, normDate, noteBody, noteProps, toStrings } from "./values";
 
 describe("toStrings", () => {
   it("flattens values to strings", () => {
@@ -29,5 +29,34 @@ describe("normDate", () => {
   });
   it("formats local times without a time zone", () => {
     expect(localIso(new Date(2026, 0, 2, 3, 4).getTime())).toBe("2026-01-02T03:04");
+  });
+});
+
+describe("content properties", () => {
+  const fm = {
+    rank: 3,
+    Status: "active",
+    tags: ["a", "b"],
+    backlinks: [{ title: "Logs" }],
+    "backlinks-open": ["x.md"],
+    "canvas-full-backlinks-enabled": true,
+    position: { start: 0 },
+  };
+  it("leaves this plugin's own keys and Obsidian's position out", () => {
+    expect(contentKeys(fm)).toEqual(["rank", "Status", "tags"]);
+    expect(contentKeys(undefined)).toEqual([]);
+  });
+  it("reads values as strings, keyed lower-case, labelled as written", () => {
+    const { props, labels, lists } = noteProps(fm);
+    expect(props).toEqual({ rank: ["3"], status: ["active"], tags: ["a", "b"] });
+    expect(labels).toEqual({ rank: "rank", status: "Status", tags: "tags" });
+    expect([...lists]).toEqual(["tags"]);
+    expect(Object.keys(noteProps(null).props)).toEqual([]);
+  });
+  it("cuts the frontmatter block off a note's text", () => {
+    const text = "---\na: 1\n---\nBody";
+    expect(noteBody(text, 12)).toBe("\nBody");
+    expect(noteBody(text, undefined)).toBe(text);
+    expect(noteBody("short", 99)).toBe("short");
   });
 });

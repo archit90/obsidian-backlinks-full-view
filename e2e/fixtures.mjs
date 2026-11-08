@@ -1,5 +1,7 @@
-// Fixture notes for the end-to-end suite: everything lives in `_bfv/` of the test vault and is rewritten
+// Fixture notes for the end-to-end suite: everything lives in `_bfv/` of the sandbox vault and is rewritten
 // (through Obsidian's vault API, so the metadata cache follows) before each group that needs a clean slate.
+// The 3,000-backlink hub `n/Maya Iyer` that Alias links to is written on disk before Obsidian starts
+// (e2e/make-vault.mjs).
 
 const fm = (props, body) => `---\n${props}\n---\n${body}\n`;
 const REFS = "Refs: [[_bfv/Open list]] [[_bfv/Yaml filter]] [[_bfv/Mismatch]] [[_bfv/Single obj]]";
@@ -23,8 +25,9 @@ backlinks:
     "rank: 1\nstatus: done\ntags: [alpha]\ncreated: 2026-09-01",
     'Heading link [[_bfv/Target#Section]] here. phrase "daily log" words.\n' + REFS,
   ),
+  // also holds this plugin's own keys, which cards, search and filters leave out
   "_bfv/src/Block.md": fm(
-    "rank: 2\nstatus: active\ncreated: 2026-11-01\nflag: true",
+    'rank: 2\nstatus: active\ncreated: 2026-11-01\nflag: true\nbacklinks-open: ["_bfv/src/Mdlink.md"]\ncanvas-full-backlinks-enabled: false',
     "Block link [[_bfv/Target#^blk]].\n" + REFS,
   ),
   "_bfv/src/Embed.md": fm("rank: 10\nstatus: idea\nflag: false", "Embed: ![[_bfv/Target]]\n" + REFS),
@@ -57,6 +60,8 @@ backlinks:
     "body",
   ),
   "_bfv/Empty list.md": fm("backlinks: []", "body"),
+  // frontmatter that isn't valid YAML: a write to it fails
+  "_bfv/Bad yaml.md": "---\nstatus: [unclosed\n---\nBroken frontmatter.\n",
   "_bfv/Null entry.md": fm("backlinks:\n  -", "body"),
   "_bfv/Titles.md": fm(
     "backlinks:\n  - sort: '[]'\n  - query: 'LIST FROM \"_bfv/src\"'\n  - title: 7",

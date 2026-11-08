@@ -2,28 +2,36 @@
 // real mouse and key input where a user would use them. The catalogue is ../TEST-CASES.md; every case here
 // carries its id from there.
 //
-// Usage
-//   1. Start a throwaway Obsidian (1.15.0) on a copy of test vault 948 with a debugging port, e.g.
-//        DISPLAY=:99 obsidian --no-sandbox --user-data-dir=/tmp/obs-profile --remote-debugging-port=9311 \
-//          --remote-allow-origins=http://localhost
-//      Never point it at a vault whose notes matter: the runner rewrites `_bfv/`, edits a few stress notes and
-//      restores them, and changes Editor Lanes' "lanes only" and "show backlinks" settings while it runs.
-//   2. CDP_PORT=9311 node custom-plugins/backlinks-full-view/e2e/run.mjs [--filter <regex>] [--no-deploy]
-//   It prints PASS / FAIL per check and writes e2e/results.md.
+// Usage (from the plugin folder)
+//   npm run build && e2e/sandbox.sh reset 1 && npm run e2e         alone: a fresh vault with only this plugin
+//   OBS_PLUGINS=blacksmithgu/obsidian-dataview@0.5.68:<path to Editor Multiple Lanes' build> \
+//     OBS_SANDBOX_DIR=$PWD/.sandbox-together e2e/sandbox.sh reset 1 && npm run e2e     together with them
+//   node e2e/run.mjs [--filter <regex>] [--no-deploy]   (CDP_PORT: default the sandbox's, see e2e/cdp.mjs)
+// It refuses any vault but a sandbox's (it rewrites `_bfv/`, edits a few notes and restores them). It prints
+// PASS / FAIL / SKIP per check and writes e2e/results.md (unless --filter). A case that needs another plugin
+// (`needs`: plugin ids, or `core:<id>` for a core plugin) is skipped without it; E2E_REQUIRE=<id>,<id> makes those
+// skips failures. BFV_PERF_SCALE=<factor> scales the time limits of the speed cases (default 1).
+// Exits 1 when a case fails.
 //
-// Not a vitest file: vitest.config.mts in custom-plugins/ only includes */src/**/*.test.ts.
+// Not a vitest file: vitest only runs src/**/*.test.ts and test/**/*.test.ts.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { connect } from "../../editor-outliner/e2e/cdp.mjs";
+import { assertSandboxVault, connect } from "./cdp.mjs";
 import { writeFixturesExpr } from "./fixtures.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN = path.dirname(HERE);
 const ID = "backlinks-full-view";
+const LANES = "editor-multiple-lanes";
 const args = process.argv.slice(2);
 const opt = n => (args.includes(n) ? args[args.indexOf(n) + 1] : undefined);
 const FILTER = opt("--filter") ? new RegExp(opt("--filter"), "i") : null;
+const REQUIRE = (process.env.E2E_REQUIRE ?? "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+const PERF = Number(process.env.BFV_PERF_SCALE) || 1;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ---------- page-side helpers (window.__t) ----------
@@ -47,8 +55,10 @@ T.card = (i, path) => T.pane(i)?.querySelector('.bfv-item[data-bfv-path="' + pat
 T.shown = (i) => T.panes()[i].items.filter(x => !x.hidden).map(x => x.path.replace(/^_bfv\\/(src\\/)?/, "").replace(/\\.md$/, ""));
 T.fm = p => app.metadataCache.getFileCache(app.vault.getAbstractFileByPath(p))?.frontmatter;
 T.read = p => app.vault.adapter.read(p);
+// Editor Multiple Lanes' cards are ordinary markdown leaves inside a lanes tab: left alone here
+T.inLanes = l => !!l.view.containerEl.closest(".lanes-view");
 T.closeAll = async () => {
-  for (const l of app.workspace.getLeavesOfType("markdown")) if (!l.view.containerEl.closest(".lanes-view")) l.detach();
+  for (const l of app.workspace.getLeavesOfType("markdown")) if (!T.inLanes(l)) l.detach();
   for (const l of app.workspace.getLeavesOfType("canvas")) l.detach();
   await T.sleep(200);
 };
@@ -63,10 +73,21 @@ T.open = async (p, mode = "lp", where = "tab") => {
   return !!T.root();
 };
 T.rect = el => { el.scrollIntoView({ block: "center" }); const b = el.getBoundingClientRect(); return { x: b.left + Math.min(b.width / 2, 30), y: b.top + b.height / 2 }; };
-T.mtime = p => app.vault.getAbstractFileByPath(p)?.stat.mtime;
 T.notices = () => [...document.querySelectorAll(".notice")].map(n => n.textContent);
 T.clearNotices = async () => { document.querySelectorAll(".notice").forEach(n => n.click()); await T.sleep(400); return true; };
 T.plugin = () => app.plugins.plugins[${JSON.stringify(ID)}];
+// Obsidian's Component class (not reachable with require here): the root of the plugin's prototype chain
+T.Component = () => { let p = Object.getPrototypeOf(T.plugin()); while (Object.getPrototypeOf(p) !== Object.prototype) p = Object.getPrototypeOf(p); return p.constructor; };
+// Editor Multiple Lanes' settings (its test API: lanesOnly / showBacklinks and settingsChanged): returns the old values
+T.lanes = async patch => {
+  const p = app.plugins.plugins[${JSON.stringify(LANES)}];
+  if (!p) return null;
+  const prev = { lanesOnly: p.settings.lanesOnly, showBacklinks: p.settings.showBacklinks };
+  Object.assign(p.settings, patch);
+  if ("lanesOnly" in patch) await p.settingsChanged("routing");
+  if ("showBacklinks" in patch) await p.settingsChanged("backlinks");
+  return prev;
+};
 if (!T.hooked) {
   T.hooked = true;
   window.addEventListener("error", e => T.errors.push("error: " + e.message));
@@ -80,8 +101,9 @@ return true;
 })()`;
 
 // ---------- harness ----------
-const c = await connect(process.env.CDP_PORT || 9311);
+const c = await connect(process.env.CDP_PORT || undefined);
 const ev = c.ev;
+const vaultPath = await assertSandboxVault(c);
 const results = [];
 let current = "";
 const check = (name, ok, detail) => {
@@ -147,7 +169,7 @@ const waitFor = async (expr, ms = 4000) => {
   return false;
 };
 const errors = async () => JSON.parse(await ev(`JSON.stringify(__t.errors.splice(0))`));
-const shotDir = process.env.SHOT_DIR;
+const shotDir = process.env.SHOT_DIR ? path.resolve(process.env.SHOT_DIR) : null; // absolute: ImageMagick policy
 async function shot(name) {
   if (!shotDir) return;
   const r = await c.send("Page.captureScreenshot", { format: "png" });
@@ -155,9 +177,9 @@ async function shot(name) {
 }
 
 const cases = [];
-// a case that tests working with another plugin names it (`{ needs: "<plugin id>" }`) and is skipped without it:
-// Backlinks Full View itself needs none of them
-const test = (id, title, fn, opts = {}) => cases.push({ id, title, fn, needs: opts.needs });
+// a case that tests working with another plugin names it (`needs`: plugin ids, `core:<id>` for core plugins) and
+// is skipped without it; Backlinks Full View itself needs none of them
+const test = (id, title, fn, opts = {}) => cases.push({ id, title, fn, needs: [opts.needs ?? []].flat() });
 const T = {
   ev,
   check,
@@ -181,6 +203,7 @@ const T = {
   send: c.send,
   errors,
   shot,
+  perf: ms => ms * PERF,
 };
 
 // ---------- the cases ----------
@@ -190,55 +213,86 @@ register(test, T);
 // ---------- run ----------
 await ev(PAGE);
 if (!args.includes("--no-deploy")) {
-  const vault = await ev(`app.vault.adapter.basePath`);
-  const dest = path.join(vault, ".obsidian/plugins", ID);
+  const dest = path.join(vaultPath, ".obsidian/plugins", ID);
+  fs.mkdirSync(dest, { recursive: true });
   for (const f of ["main.js", "manifest.json", "styles.css"]) fs.copyFileSync(path.join(PLUGIN, f), path.join(dest, f));
   await ev(
-    `(async () => { await app.plugins.disablePlugin(${JSON.stringify(ID)}); await app.plugins.enablePlugin(${JSON.stringify(ID)}); return true; })()`,
+    `(async () => { await app.plugins.loadManifests(); await app.plugins.disablePlugin(${JSON.stringify(ID)}); await app.plugins.enablePlugin(${JSON.stringify(ID)}); return true; })()`,
   );
   await sleep(1500);
 }
-// normal tabs stay tabs (Editor Lanes would move them into lanes)
-await ev(
-  `(async () => { const p = app.plugins.plugins["editor-multiple-lanes"]; if (p) { p.settings.lanesOnly = false; p.settings.showBacklinks = true; await p.saveSettings?.(); } return true; })()`,
+// prepare: the vault settings the cases rely on (make-vault.mjs wrote them too; put back at the end), the link
+// index complete (3,000 notes on a first start), and normal tabs staying tabs when Editor Multiple Lanes is there
+const CONFIG = { alwaysUpdateLinks: true, readableLineLength: false };
+const savedConfig = await ev(
+  `(() => { const was = {}; for (const [k, v] of Object.entries(${JSON.stringify(CONFIG)})) { was[k] = app.vault.getConfig(k); app.vault.setConfig(k, v); } return was; })()`,
 );
+const indexed = await ev(`(async () => {
+  for (let i = 0; i < 240; i++) {
+    const files = app.vault.getMarkdownFiles().length, done = Object.keys(app.metadataCache.resolvedLinks).length;
+    if (done >= files) return { files, done };
+    await __t.sleep(500);
+  }
+  return null;
+})()`);
+if (!indexed) console.log("WARN the link index didn't cover every note within 2 minutes");
+const hub = await ev(`!!app.vault.getAbstractFileByPath("n/Maya Iyer.md")`);
+if (!hub) console.log("WARN no hub note n/Maya Iyer.md: e2e/make-vault.mjs makes it (B7, N1, N2 will fail)");
+const savedLanes = await ev(`__t.lanes({ lanesOnly: false, showBacklinks: true })`);
 await ev(`__t.errors.splice(0)`);
 const started = Date.now();
 let roLoops = 0;
 const loaded = new Set(await ev(`Object.keys(app.plugins.plugins)`));
+const coreOn = new Set(
+  await ev(`Object.keys(app.internalPlugins.plugins).filter(id => !!app.internalPlugins.getEnabledPluginById(id))`),
+);
+const has = id => (id.startsWith("core:") ? coreOn.has(id.slice(5)) : loaded.has(id));
 const skipped = [];
-for (const k of cases) {
-  if (FILTER && !FILTER.test(k.id + " " + k.title)) continue;
-  if (k.needs && !loaded.has(k.needs)) {
-    skipped.push(k.id);
-    console.log(`SKIP ${k.id} (${k.needs} not enabled)`);
-    continue;
+try {
+  for (const k of cases) {
+    if (FILTER && !FILTER.test(k.id + " " + k.title)) continue;
+    current = k.id;
+    const missing = k.needs.filter(id => !has(id));
+    if (missing.length) {
+      const required = missing.filter(id => REQUIRE.includes(id));
+      if (required.length) check(`needs ${required.join(", ")}: not enabled (E2E_REQUIRE)`, false);
+      else {
+        skipped.push(k.id);
+        console.log(`SKIP ${k.id} (needs ${missing.join(", ")}: not enabled)`);
+      }
+      continue;
+    }
+    try {
+      await k.fn(T);
+    } catch (e) {
+      check(
+        "threw",
+        false,
+        String(e?.stack ?? e)
+          .split("\n")
+          .slice(0, 3)
+          .join(" | "),
+      );
+    }
+    // Chromium's benign "ResizeObserver loop completed with undelivered notifications" also shows up without this
+    // plugin (Obsidian resizes its editors inside its own ResizeObserver): counted, not failed
+    const all = await errors();
+    roLoops += all.filter(e => e.includes("ResizeObserver loop")).length;
+    const errs = all.filter(e => !e.includes("ResizeObserver loop"));
+    if (errs.length) check("console clean", false, errs.slice(0, 3));
   }
-  current = k.id;
-  try {
-    await k.fn(T);
-  } catch (e) {
-    check(
-      "threw",
-      false,
-      String(e?.stack ?? e)
-        .split("\n")
-        .slice(0, 3)
-        .join(" | "),
-    );
-  }
-  // Chromium's benign "ResizeObserver loop completed with undelivered notifications" also shows up without this
-  // plugin (Obsidian resizes its editors inside its own ResizeObserver): counted, not failed
-  const all = await errors();
-  roLoops += all.filter(e => e.includes("ResizeObserver loop")).length;
-  const errs = all.filter(e => !e.includes("ResizeObserver loop"));
-  if (errs.length) check("console clean", false, errs.slice(0, 3));
+} finally {
+  await ev(
+    `(() => { for (const [k, v] of Object.entries(${JSON.stringify(savedConfig)})) app.vault.setConfig(k, v); return 1; })()`,
+  );
+  if (savedLanes) await ev(`__t.lanes(${JSON.stringify(savedLanes)})`);
 }
 const pass = results.filter(r => r.ok).length;
 const ids = [...new Set(results.map(r => r.id))];
 const failedIds = ids.filter(id => results.some(r => r.id === id && !r.ok));
+const partners = [...loaded].filter(id => id !== ID).sort();
 console.log(
-  `\n${pass}/${results.length} checks passed; ${ids.length - failedIds.length}/${ids.length} cases passed in ${Math.round((Date.now() - started) / 1000)} s`,
+  `\n${pass}/${results.length} checks passed; ${ids.length - failedIds.length}/${ids.length} cases passed, ${skipped.length} skipped in ${Math.round((Date.now() - started) / 1000)} s`,
 );
 if (failedIds.length) console.log("FAILED: " + failedIds.join(", "));
 if (skipped.length) console.log("SKIPPED (another plugin not enabled): " + skipped.join(", "));
@@ -246,8 +300,9 @@ console.log(`ResizeObserver loop warnings (benign, not failed): ${roLoops}`);
 const lines = [
   "# Backlinks Full View e2e results",
   "",
-  `Run ${new Date().toISOString()} against ${await ev("app.vault.getName()")} (Obsidian ${await ev("require('electron').ipcRenderer.sendSync('version')")}).`,
-  `${pass}/${results.length} checks, ${ids.length - failedIds.length}/${ids.length} cases passed. ResizeObserver loop warnings (benign): ${roLoops}.`,
+  `Run ${new Date().toISOString()} against a sandbox vault (Obsidian ${await ev("require('electron').ipcRenderer.sendSync('version')")}), ` +
+    `other plugins: ${partners.length ? partners.join(", ") : "none"}${PERF !== 1 ? `, BFV_PERF_SCALE=${PERF}` : ""}.`,
+  `${pass}/${results.length} checks, ${ids.length - failedIds.length}/${ids.length} cases passed, ${skipped.length} skipped. ResizeObserver loop warnings (benign): ${roLoops}.`,
   "",
   "| Case | Result | Failed checks |",
   "|---|---|---|",
@@ -255,8 +310,8 @@ const lines = [
     const bad = results.filter(r => r.id === id && !r.ok);
     return `| ${id} | ${bad.length ? "FAIL" : "PASS"} | ${bad.map(b => b.name + (b.detail === undefined ? "" : ": `" + JSON.stringify(b.detail).slice(0, 160) + "`")).join("; ")} |`;
   }),
+  ...skipped.map(id => `| ${id} | SKIP | needs ${cases.find(k => k.id === id).needs.join(", ")} |`),
 ];
-if (skipped.length) lines.splice(4, 0, `Skipped, another plugin not enabled: ${skipped.join(", ")}.`);
-if (!FILTER) fs.writeFileSync(path.join(HERE, "results.md"), lines.join("\n") + "\n");
+if (!FILTER) fs.writeFileSync(path.join(HERE, process.env.RESULTS ?? "results.md"), lines.join("\n") + "\n");
 c.close();
 process.exit(failedIds.length ? 1 : 0);
