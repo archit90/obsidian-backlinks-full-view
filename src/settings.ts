@@ -1,16 +1,25 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type FullBacklinksPlugin from "./main";
+import { MAX_OPEN_SAVED } from "./constants";
 
 /** Plugin-wide settings (data.json). Per-note pane settings live in frontmatter (see config.ts). */
 export interface PluginSettings {
   canvas: boolean; // show panes on canvas note cards (while editing, and in reading view when the note opts in)
   noteEmbeds: boolean; // render `![[note]]` embeds as collapsible cards, as in the panes
+  maxOpen: number; // expanded cards remembered per note in `backlinks-open` (0: not remembered)
 }
 
 export const PLUGIN_DEFAULTS: PluginSettings = {
   canvas: true,
   noteEmbeds: true,
+  maxOpen: MAX_OPEN_SAVED,
 };
+
+/** A saved or typed number of remembered cards: a whole number from 0 to 500, else the default. */
+export function maxOpenOf(v: unknown): number {
+  const n = typeof v === "string" && v.trim() !== "" ? Number(v) : v;
+  return typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 500 ? n : MAX_OPEN_SAVED;
+}
 
 export class FullBacklinksSettingTab extends PluginSettingTab {
   constructor(
@@ -48,5 +57,23 @@ export class FullBacklinksSettingTab extends PluginSettingTab {
           this.plugin.rerenderNoteEmbeds();
         }),
       );
+    new Setting(containerEl)
+      .setName("Remembered expanded cards")
+      .setDesc(
+        "How many expanded cards each note remembers, most recent first, in its backlinks-open property (one list for " +
+          "all its panes: a remembered note opens expanded in every pane that shows it). 0: cards always start " +
+          "collapsed and the property isn't written. 0–500.",
+      )
+      .addText(t => {
+        t.inputEl.type = "number";
+        t.inputEl.min = "0";
+        t.inputEl.max = "500";
+        t.setValue(String(this.plugin.settings.maxOpen)).onChange(async v => {
+          const n = Number(v);
+          if (v.trim() === "" || !Number.isInteger(n) || n < 0 || n > 500) return;
+          this.plugin.settings.maxOpen = n;
+          await this.plugin.saveSettings();
+        });
+      });
   }
 }

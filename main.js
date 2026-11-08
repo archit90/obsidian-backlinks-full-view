@@ -29,20 +29,6 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian2 = require("obsidian");
 
-// src/constants.ts
-var PANEL_CLASS = "bfv-panel";
-var HOVER_SOURCE = "backlinks-full-view";
-var DEFAULT_EMBED_LIMIT = 25;
-var MAX_EMBED_DEPTH = 3;
-var MAX_OPEN_SAVED = 50;
-var CONFIG_SAVE_DELAY = 600;
-var OPEN_SAVE_DELAY = 5e3;
-var REFRESH_DELAY = 300;
-var DV_DELAY = 2500;
-var CARD_RERENDER_DELAY = 500;
-var SKIP_SELECTOR = "[data-bfv-skip]";
-var CANVAS_OPT_IN = "canvas-full-backlinks-enabled";
-
 // src/values.ts
 function toStrings(v) {
   if (v === null || v === void 0) return [];
@@ -76,18 +62,15 @@ var defaults = () => ({
   // pane heading; falls back to "Backlinks" or "Query"
   filter: { type: "group", mode: "and", children: [] },
   sorts: [{ prop: "file.name", dir: "asc" }],
-  query: "",
+  query: ""
   // optional Dataview query that supplies the notes instead of backlinks
-  open: []
-  // paths of expanded cards, most recent first (at most MAX_OPEN_SAVED)
 });
 var clone = (v) => JSON.parse(JSON.stringify(v));
 var KEYS = [
   ["title", "title"],
   ["filter", "filter"],
   ["sort", "sorts"],
-  ["query", "query"],
-  ["open", "open"]
+  ["query", "query"]
 ];
 var FILE_PROPS = [
   { id: "file.name", label: "name", type: "text", group: "file" },
@@ -135,7 +118,7 @@ function parseEntry(e) {
   const errors = [];
   if (e === null || e === void 0) return { cfg, raw: null, errors };
   if (!isPlainObject(e))
-    return { cfg, raw: null, errors: ["the entry isn't a set of pane keys (title, filter, sort, query, open)"] };
+    return { cfg, raw: null, errors: ["the entry isn't a set of pane keys (title, filter, sort, query)"] };
   const r = e;
   if (typeof r.title === "string" || typeof r.title === "number") cfg.title = String(r.title).trim();
   else if (r.title != null) errors.push("`title` isn't text");
@@ -154,15 +137,6 @@ function parseEntry(e) {
   }
   if (typeof r.query === "string") cfg.query = r.query.trim();
   else if (r.query != null) errors.push("`query` isn't text");
-  const ov = jsonField(r.open, "open", errors);
-  if (ov !== void 0) {
-    if (Array.isArray(ov)) {
-      cfg.open = [...new Set(ov.filter((x) => typeof x === "string" && x !== ""))].slice(
-        0,
-        MAX_OPEN_SAVED
-      );
-    } else errors.push("`open` isn't a list of paths");
-  }
   return { cfg, raw: r, errors };
 }
 function sanitizeGroup(x) {
@@ -219,12 +193,12 @@ function serializeEntry(e) {
     // a filter without a single rule filters nothing, whatever its groups' modes: cleared
     filter: countRules(c.filter) === 0 ? null : JSON.stringify(c.filter),
     sort: JSON.stringify(c.sorts) === JSON.stringify(def.sorts) ? null : JSON.stringify(c.sorts),
-    query: c.query || null,
-    open: c.open.length ? [...c.open] : null
+    query: c.query || null
   };
   if (!e.raw) return Object.fromEntries(Object.entries(vals).filter(([, v]) => v !== null));
   const was = parseEntry(e.raw).cfg;
   const out = { ...e.raw };
+  delete out.open;
   for (const [k, f] of KEYS) {
     if (k in e.raw && JSON.stringify(was[f]) === JSON.stringify(c[f])) continue;
     if (vals[k] === null) {
@@ -235,6 +209,60 @@ function serializeEntry(e) {
   }
   return out;
 }
+function cleanPaths(v, max) {
+  return [...new Set(v.filter((x) => typeof x === "string" && x !== ""))].slice(0, max);
+}
+function parseOpen(raw, max) {
+  if (raw === null || raw === void 0 || raw === "") return { paths: [], error: "" };
+  if (typeof raw === "string") return { paths: cleanPaths([raw], max), error: "" };
+  if (!Array.isArray(raw)) return { paths: [], error: "The `backlinks-open` property isn't a list of paths" };
+  return { paths: cleanPaths(raw, max), error: "" };
+}
+function legacyOpen(backlinks, max) {
+  const arr = Array.isArray(backlinks) ? backlinks : isPlainObject(backlinks) ? [backlinks] : [];
+  const all = [];
+  for (const e of arr) {
+    if (!isPlainObject(e)) continue;
+    let v = e.open;
+    if (typeof v === "string") {
+      try {
+        v = JSON.parse(v);
+      } catch {
+        continue;
+      }
+    }
+    if (Array.isArray(v)) all.push(...v);
+  }
+  return cleanPaths(all, max);
+}
+function hasLegacyOpen(backlinks) {
+  const arr = Array.isArray(backlinks) ? backlinks : isPlainObject(backlinks) ? [backlinks] : [];
+  return arr.some((e) => isPlainObject(e) && "open" in e);
+}
+function mergeOpen(base, ours, disk, max) {
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  if (same(ours, base)) return disk.slice(0, max);
+  if (same(disk, base)) return ours.slice(0, max);
+  const was = new Set(base), now = new Set(ours);
+  const added = ours.filter((p) => !was.has(p));
+  const removed = new Set(base.filter((p) => !now.has(p)));
+  return cleanPaths([...added, ...ours.filter((p) => was.has(p)), ...disk.filter((p) => !removed.has(p))], max);
+}
+
+// src/constants.ts
+var PANEL_CLASS = "bfv-panel";
+var HOVER_SOURCE = "backlinks-full-view";
+var DEFAULT_EMBED_LIMIT = 25;
+var MAX_EMBED_DEPTH = 3;
+var MAX_OPEN_SAVED = 50;
+var OPEN_PROP = "backlinks-open";
+var CONFIG_SAVE_DELAY = 600;
+var OPEN_SAVE_DELAY = 5e3;
+var REFRESH_DELAY = 300;
+var DV_DELAY = 2500;
+var CARD_RERENDER_DELAY = 500;
+var SKIP_SELECTOR = "[data-bfv-skip]";
+var CANVAS_OPT_IN = "canvas-full-backlinks-enabled";
 
 // src/dataview.ts
 var isObj = (v) => typeof v === "object" && v !== null;
@@ -335,8 +363,13 @@ function around1(obj, method, createWrapper) {
 var import_obsidian = require("obsidian");
 var PLUGIN_DEFAULTS = {
   canvas: true,
-  noteEmbeds: true
+  noteEmbeds: true,
+  maxOpen: MAX_OPEN_SAVED
 };
+function maxOpenOf(v) {
+  const n = typeof v === "string" && v.trim() !== "" ? Number(v) : v;
+  return typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 500 ? n : MAX_OPEN_SAVED;
+}
 var FullBacklinksSettingTab = class extends import_obsidian.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -362,6 +395,19 @@ var FullBacklinksSettingTab = class extends import_obsidian.PluginSettingTab {
         this.plugin.rerenderNoteEmbeds();
       })
     );
+    new import_obsidian.Setting(containerEl).setName("Remembered expanded cards").setDesc(
+      "How many expanded cards each note remembers, most recent first, in its backlinks-open property (one list for all its panes: a remembered note opens expanded in every pane that shows it). 0: cards always start collapsed and the property isn't written. 0\u2013500."
+    ).addText((t) => {
+      t.inputEl.type = "number";
+      t.inputEl.min = "0";
+      t.inputEl.max = "500";
+      t.setValue(String(this.plugin.settings.maxOpen)).onChange(async (v) => {
+        const n = Number(v);
+        if (v.trim() === "" || !Number.isInteger(n) || n < 0 || n > 500) return;
+        this.plugin.settings.maxOpen = n;
+        await this.plugin.saveSettings();
+      });
+    });
   }
 };
 
@@ -589,6 +635,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
   }
   async onload() {
     this.settings = Object.assign({}, PLUGIN_DEFAULTS, await this.loadData());
+    this.settings.maxOpen = maxOpenOf(this.settings.maxOpen);
     this.addSettingTab(new FullBacklinksSettingTab(this.app, this));
     window.bfv = this.api;
     this.registerHoverLinkSource(HOVER_SOURCE, { display: "Backlinks Full View", defaultMod: true });
@@ -649,13 +696,13 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
         if (!(file instanceof import_obsidian2.TFile)) return;
         for (const vs of this.views.values()) {
           if (vs.notePath === oldPath) vs.notePath = file.path;
-          for (const st of vs.panes) {
-            if (!st.opened.has(oldPath) && !st.config.open.includes(oldPath)) continue;
-            if (st.opened.delete(oldPath)) st.opened.add(file.path);
-            st.openOrder = st.openOrder.map((p) => p === oldPath ? file.path : p);
-            st.config.open = st.config.open.map((p) => p === oldPath ? file.path : p);
-            this.persist(st, true);
-          }
+          if (!vs.opened.has(oldPath) && !vs.open.includes(oldPath)) continue;
+          if (vs.opened.delete(oldPath)) vs.opened.add(file.path);
+          vs.openOrder = vs.openOrder.map((p) => p === oldPath ? file.path : p);
+          this.setOpenList(
+            vs,
+            vs.open.map((p) => p === oldPath ? file.path : p)
+          );
         }
         touch(oldPath);
         touch(file.path);
@@ -1046,6 +1093,13 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
       listError: "",
       dirty: false,
       configPending: false,
+      opened: /* @__PURE__ */ new Set(),
+      openOrder: [],
+      open: [],
+      openBase: [],
+      openPrev: [],
+      openError: "",
+      openDirty: false,
       graceUntil: 0,
       saveSoon: (0, import_obsidian2.debounce)(() => this.flush(vs), CONFIG_SAVE_DELAY, true),
       saveLater: (0, import_obsidian2.debounce)(() => this.flush(vs), OPEN_SAVE_DELAY, true),
@@ -1216,7 +1270,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     if (sig === st.signature) return;
     st.signature = sig;
     this.sync(st, sources);
-    this.pruneOpen(st);
+    this.pruneOpen(st.view);
   }
   /** True once Obsidian's link index covers the whole vault (so missing backlinks really are gone). */
   linksReady() {
@@ -1225,20 +1279,34 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     return resolved > 0 && resolved >= this.app.vault.getMarkdownFiles().length;
   }
   /**
-   * Drop remembered cards that are no longer in the pane's results (deleted, renamed, or no longer matching
-   * the query), so `open:` only lists existing notes. Skipped while indexes are still loading or the query
-   * failed, when an empty or partial result would wrongly wipe the list.
+   * Drop remembered cards whose note is in none of the panes' results any more (deleted, renamed, no longer
+   * linking here, or no longer matching a query), so `backlinks-open` only lists notes the panes show. Every
+   * pane but a query pane shows a subset of the backlinks, so a remembered note that's still a backlink stays.
+   * Skipped while indexes are still loading, and while a query pane's results aren't known (never expanded,
+   * failed, or Dataview still indexing), when an empty or partial result would wrongly wipe the list.
    */
-  pruneOpen(st) {
-    if (!st.config.open.length || st.error || !this.linksReady()) return;
-    if (st.config.query && !this.app.plugins?.plugins?.dataview?.index?.initialized) return;
-    const keep = st.config.open.filter((p) => st.items.has(p));
-    if (keep.length === st.config.open.length) return;
-    const gone = st.config.open.filter((p) => !st.items.has(p));
-    for (const p of gone) st.opened.delete(p);
-    st.openOrder = st.openOrder.filter((p) => st.items.has(p));
-    st.config.open = keep;
-    this.persist(st, true);
+  pruneOpen(vs) {
+    if (!vs.open.length || !vs.notePath || !this.linksReady()) return;
+    const queries = vs.panes.filter((p) => p.config.query.trim());
+    const gone = vs.open.filter((p) => !vs.sourcePaths.has(p) && !queries.some((q) => q.queryPaths?.includes(p)));
+    if (!gone.length) return;
+    if (queries.length && !this.app.plugins?.plugins?.dataview?.index?.initialized) return;
+    if (queries.some((q) => q.queryPaths === null || q.error || q.deferred)) return;
+    for (const p of gone) vs.opened.delete(p);
+    vs.openOrder = vs.openOrder.filter((p) => !gone.includes(p));
+    this.setOpenList(
+      vs,
+      vs.open.filter((p) => !gone.includes(p))
+    );
+  }
+  /** Expanded cards to remember changed: schedule the (long-delay) write. */
+  setOpenList(vs, next) {
+    next = next.slice(0, this.settings.maxOpen);
+    if (JSON.stringify(next) === JSON.stringify(vs.open)) return;
+    vs.open = next;
+    if (!this.settings.maxOpen) return;
+    vs.openDirty = true;
+    if (!vs.configPending) vs.saveLater();
   }
   // ---------- panel skeleton ----------
   createPanel(vs, config, entry, ephemeral = false) {
@@ -1307,8 +1375,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
       dead: false,
       ephemeral,
       deferred: true,
-      opened: new Set(config.open),
-      openOrder: [...config.open].reverse(),
+      opened: vs.opened,
       items: /* @__PURE__ */ new Map(),
       order: [],
       needsSort: true,
@@ -1431,26 +1498,21 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
   }
   showViewErrors(vs) {
     const bad = vs.listError || vs.panes.some((p) => p.parseErrors.length);
-    vs.warnEl.toggleClass("bfv-hidden", !bad);
-    vs.warnEl.setText(
-      vs.listError ? `\u26A0 ${vs.listError}. Pane settings for this note aren't saved until it's fixed.` : bad ? "\u26A0 A pane below has frontmatter errors; pane settings for this note aren't saved until they're fixed." : ""
-    );
+    const msgs = [
+      vs.listError ? `\u26A0 ${vs.listError}. Pane settings for this note aren't saved until it's fixed.` : bad ? "\u26A0 A pane below has frontmatter errors; pane settings for this note aren't saved until they're fixed." : "",
+      vs.openError ? `\u26A0 ${vs.openError}. Expanded cards for this note aren't saved until it's fixed.` : ""
+    ].filter(Boolean);
+    vs.warnEl.toggleClass("bfv-hidden", !msgs.length);
+    vs.warnEl.setText(msgs.join(" "));
   }
   // ---------- config editing UI ----------
-  /**
-   * Mark a pane's settings as changed and schedule a frontmatter write (never for the built-in pane).
-   * `openOnly`: just the expanded-cards list changed, which is written after a long delay.
-   */
-  persist(st, openOnly = false) {
+  /** Mark a pane's settings as changed and schedule a frontmatter write (never for the built-in pane). */
+  persist(st) {
     if (st.ephemeral || st.dead) return;
-    this.markDirty(st.view, openOnly);
+    this.markDirty(st.view);
   }
-  markDirty(vs, openOnly = false) {
+  markDirty(vs) {
     vs.dirty = true;
-    if (openOnly && !vs.configPending) {
-      vs.saveLater();
-      return;
-    }
     vs.configPending = true;
     vs.saveLater.cancel();
     vs.saveSoon();
@@ -1499,7 +1561,9 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
       vs.gen++;
       vs.graceUntil = 0;
     }
-    const parsed = parseList(this.app.metadataCache.getFileCache(file)?.frontmatter?.backlinks);
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    this.loadOpen(vs, fm, switched);
+    const parsed = parseList(fm?.backlinks);
     const json = listJson(parsed.entries);
     if (!switched) {
       if (json === vs.savedJson && parsed.error === vs.listError) {
@@ -1530,6 +1594,30 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     }
     this.applyEntries(vs, parsed.entries, switched);
   }
+  /**
+   * Read the note's expanded cards: `backlinks-open`, or when it's absent the older per-pane `open` lists. A
+   * change made elsewhere is shown at once, unless toggles made here are waiting, which merge with it when
+   * they're written.
+   */
+  loadOpen(vs, fm, switched) {
+    const max = this.settings.maxOpen;
+    const raw = fm?.[OPEN_PROP];
+    const read = raw === void 0 ? { paths: legacyOpen(fm?.backlinks, max), error: "" } : parseOpen(raw, max);
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    if (!switched) {
+      if (same(read.paths, vs.openBase) && read.error === vs.openError) return;
+      if (Date.now() < vs.graceUntil && same(read.paths, vs.openPrev)) return;
+      vs.openError = read.error;
+      this.showViewErrors(vs);
+      if (vs.openDirty && !read.error) return;
+    }
+    vs.openError = read.error;
+    vs.open = [...read.paths];
+    vs.openBase = vs.openPrev = read.paths;
+    vs.openDirty = false;
+    this.syncOpen(vs);
+    this.showViewErrors(vs);
+  }
   /** Make the panes match a list read from (or just written to) the frontmatter, reusing existing panes. */
   applyEntries(vs, entries, fresh) {
     vs.baseList = entries;
@@ -1550,7 +1638,6 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
         p.queryInput.value = cfg.query;
         p.titleInput.value = cfg.title;
         this.showPaneErrors(p);
-        this.syncOpen(p);
         p.updateButtons();
         if (!fresh) {
           p.renderEditors();
@@ -1564,47 +1651,81 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     this.showViewErrors(vs);
   }
   async writeConfig(vs) {
-    if (!vs.dirty) return;
-    vs.dirty = false;
+    const cfgDirty = vs.dirty, openDirty = vs.openDirty;
+    if (!cfgDirty && !openDirty) return;
+    vs.dirty = vs.openDirty = false;
     const path = vs.notePath, gen = vs.gen;
     const file = path ? this.app.vault.getAbstractFileByPath(path) : null;
     if (!(file instanceof import_obsidian2.TFile)) return;
     if (typeof this.app.fileManager?.processFrontMatter !== "function") return;
-    if (this.hasErrors(vs)) return;
+    const max = this.settings.maxOpen;
+    const writeCfg = cfgDirty && !this.hasErrors(vs);
+    const writeOpen = openDirty && !vs.openError && max > 0;
+    if (!writeCfg && !writeOpen) return;
     const base = vs.baseList;
     const ours = vs.panes.map((p) => ({ cfg: clone(p.config), raw: p.raw, errors: [], src: p.srcIndex }));
-    const cachedRaw = this.app.metadataCache.getFileCache(file)?.frontmatter?.backlinks;
-    const cached = parseList(cachedRaw);
-    if (cached.error || cached.entries.some((e) => e.errors.length)) return;
-    const planned = merge(base, ours, cached.entries);
-    const plannedOut = planned.map((e) => serializeEntry(e));
-    if (JSON.stringify(plannedOut) === JSON.stringify(cachedRaw ?? [])) {
-      this.afterWrite(vs, gen, planned, ours);
-      return;
-    }
+    const openBase = vs.openBase, openOurs = [...vs.open];
+    const plan = (fm) => {
+      let changed = false;
+      let entries = null;
+      const disk = parseList(fm?.backlinks);
+      const legacy = hasLegacyOpen(fm?.backlinks);
+      if (!disk.error && !disk.entries.some((e) => e.errors.length) && (writeCfg || legacy)) {
+        entries = writeCfg ? merge(base, ours, disk.entries) : disk.entries;
+        if (JSON.stringify(entries.map((e) => serializeEntry(e))) !== JSON.stringify(fm?.backlinks ?? [])) changed = true;
+      }
+      let open = null;
+      const rawOpen = fm?.[OPEN_PROP];
+      const dOpen = rawOpen === void 0 ? { paths: legacyOpen(fm?.backlinks, max), error: "" } : parseOpen(rawOpen, max);
+      if (!dOpen.error && (writeOpen || legacy && entries)) {
+        open = writeOpen ? mergeOpen(openBase, openOurs, dOpen.paths, max) : dOpen.paths;
+        if (JSON.stringify(open) !== JSON.stringify(rawOpen ?? [])) changed = true;
+      }
+      return { entries, open, changed };
+    };
+    const planned = plan(this.app.metadataCache.getFileCache(file)?.frontmatter);
     let written = planned;
-    vs.prevJson = vs.savedJson;
-    vs.savedJson = listJson(planned);
-    vs.baseList = planned;
-    vs.graceUntil = Date.now() + 1500;
-    try {
-      await this.app.fileManager.processFrontMatter(file, (fm) => {
-        const disk = parseList(fm.backlinks);
-        if (disk.error || disk.entries.some((e) => e.errors.length)) {
-          written = disk.entries;
-          return;
-        }
-        written = merge(base, ours, disk.entries);
-        const out = written.map((e) => serializeEntry(e));
-        if (JSON.stringify(out) === JSON.stringify(fm.backlinks ?? [])) return;
-        if (out.length === 0) delete fm.backlinks;
-        else fm.backlinks = out;
-      });
-    } catch (e) {
-      console.error("[backlinks-full-view] couldn't save pane settings to", path, e);
-      return;
+    if (planned.changed) {
+      if (planned.entries && writeCfg) {
+        vs.prevJson = vs.savedJson;
+        vs.savedJson = listJson(planned.entries);
+        vs.baseList = planned.entries;
+      }
+      if (planned.open) {
+        vs.openPrev = vs.openBase;
+        vs.openBase = planned.open;
+      }
+      vs.graceUntil = Date.now() + 1500;
+      try {
+        await this.app.fileManager.processFrontMatter(file, (fm) => {
+          written = plan(fm);
+          if (written.entries) {
+            const out = written.entries.map((e) => serializeEntry(e));
+            if (JSON.stringify(out) !== JSON.stringify(fm.backlinks ?? [])) {
+              if (out.length === 0) delete fm.backlinks;
+              else fm.backlinks = out;
+            }
+          }
+          if (written.open && JSON.stringify(written.open) !== JSON.stringify(fm[OPEN_PROP] ?? [])) {
+            if (written.open.length) fm[OPEN_PROP] = written.open;
+            else delete fm[OPEN_PROP];
+          }
+        });
+      } catch (e) {
+        console.error("[backlinks-full-view] couldn't save pane settings to", path, e);
+        return;
+      }
     }
-    this.afterWrite(vs, gen, written, ours);
+    if (written.open) this.afterOpenWrite(vs, gen, written.open, openOurs);
+    if (writeCfg && written.entries) this.afterWrite(vs, gen, written.entries, ours);
+  }
+  /** Record the expanded cards now on disk; if the merge brought in cards toggled elsewhere, show them. */
+  afterOpenWrite(vs, gen, written, ours) {
+    if (vs.gen !== gen || !this.views.has(vs.view)) return;
+    vs.openBase = written;
+    if (vs.openDirty || JSON.stringify(written) === JSON.stringify(ours)) return;
+    vs.open = [...written];
+    this.syncOpen(vs);
   }
   /** Record what's on disk now; if the merge brought in changes made elsewhere, show them. */
   afterWrite(vs, gen, written, ours) {
@@ -2148,22 +2269,28 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     );
     return { file: src, ver, el, comp, setOpen, invalidate, ...this.itemData(src) };
   }
-  /** The user expanded or collapsed a card: update recency and persist the most recent MAX_OPEN_SAVED. */
+  /**
+   * The user expanded or collapsed a card. The view's panes share one list of expanded cards, so the same
+   * note's card in the other panes follows; the most recent ones (the "Remembered expanded cards" setting)
+   * are saved in `backlinks-open`.
+   */
   cardToggled(st, path, open) {
-    st.openOrder = st.openOrder.filter((p) => p !== path);
-    if (open) st.openOrder.push(path);
-    if (st.items.size && !st.error) st.openOrder = st.openOrder.filter((p) => st.items.has(p));
-    const next = st.openOrder.slice(-MAX_OPEN_SAVED).reverse();
-    if (JSON.stringify(next) === JSON.stringify(st.config.open)) return;
-    st.config.open = next;
-    this.persist(st, true);
+    const vs = st.view;
+    vs.openOrder = vs.openOrder.filter((p) => p !== path);
+    if (open) vs.openOrder.push(path);
+    for (const p of [vs.base, ...vs.panes]) {
+      const it = p && p !== st ? p.items.get(path) : void 0;
+      if (it) void it.setOpen(open);
+    }
+    this.setOpenList(vs, vs.openOrder.slice().reverse());
   }
-  /** Frontmatter changed from outside: expand exactly the cards it lists. */
-  syncOpen(st) {
-    st.opened.clear();
-    for (const p of st.config.open) st.opened.add(p);
-    st.openOrder = [...st.config.open].reverse();
-    for (const it of st.items.values()) void it.setOpen(st.opened.has(it.file.path));
+  /** The note's `backlinks-open` was read: expand exactly the cards it lists, in every pane. */
+  syncOpen(vs) {
+    vs.opened.clear();
+    for (const p of vs.open) vs.opened.add(p);
+    vs.openOrder = [...vs.open].reverse();
+    for (const st of [vs.base, ...vs.panes])
+      if (st) for (const it of st.items.values()) void it.setOpen(vs.opened.has(it.file.path));
   }
   /**
    * Internal links anywhere under `el` (card titles and links inside rendered notes) follow Obsidian's

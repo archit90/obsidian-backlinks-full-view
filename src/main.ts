@@ -31,9 +31,13 @@ import {
   countRules,
   defaults,
   dirLabels,
+  hasLegacyOpen,
+  legacyOpen,
   listJson,
   merge,
+  mergeOpen,
   parseList,
+  parseOpen,
   serializeEntry,
 } from "./config";
 import {
@@ -42,7 +46,7 @@ import {
   DEFAULT_EMBED_LIMIT,
   HOVER_SOURCE,
   MAX_EMBED_DEPTH,
-  MAX_OPEN_SAVED,
+  OPEN_PROP,
   OPEN_SAVE_DELAY,
   PANEL_CLASS,
   REFRESH_DELAY,
@@ -52,7 +56,7 @@ import {
 } from "./constants";
 import { notePathsInResult, resultRowCount } from "./dataview";
 import { around } from "monkey-around";
-import { FullBacklinksSettingTab, PLUGIN_DEFAULTS, PluginSettings } from "./settings";
+import { FullBacklinksSettingTab, PLUGIN_DEFAULTS, PluginSettings, maxOpenOf } from "./settings";
 import { SearchNode, evalSearch, parseSearch } from "./search";
 import { CanvasEmbed, ItemData, ItemState, NoteView, PanelState, Pred, QueryResult, Typed, ViewState } from "./state";
 import { DATE_RE, localIso, normDate, toStrings } from "./values";
@@ -158,6 +162,7 @@ export default class FullBacklinksPlugin extends Plugin {
 
   override async onload() {
     this.settings = Object.assign({}, PLUGIN_DEFAULTS, await this.loadData());
+    this.settings.maxOpen = maxOpenOf(this.settings.maxOpen);
     this.addSettingTab(new FullBacklinksSettingTab(this.app, this));
     // short global for DataviewJS:  bfv.embed(dv, dv.pages("#x"))
     window.bfv = this.api;
@@ -220,13 +225,13 @@ export default class FullBacklinksPlugin extends Plugin {
         for (const vs of this.views.values()) {
           if (vs.notePath === oldPath) vs.notePath = file.path; // same note, new path
           // an expanded card of the renamed note stays expanded, under its new path
-          for (const st of vs.panes) {
-            if (!st.opened.has(oldPath) && !st.config.open.includes(oldPath)) continue;
-            if (st.opened.delete(oldPath)) st.opened.add(file.path);
-            st.openOrder = st.openOrder.map(p => (p === oldPath ? file.path : p));
-            st.config.open = st.config.open.map(p => (p === oldPath ? file.path : p));
-            this.persist(st, true);
-          }
+          if (!vs.opened.has(oldPath) && !vs.open.includes(oldPath)) continue;
+          if (vs.opened.delete(oldPath)) vs.opened.add(file.path);
+          vs.openOrder = vs.openOrder.map(p => (p === oldPath ? file.path : p));
+          this.setOpenList(
+            vs,
+            vs.open.map(p => (p === oldPath ? file.path : p)),
+          );
         }
         touch(oldPath);
         touch(file.path);
@@ -679,6 +684,13 @@ export default class FullBacklinksPlugin extends Plugin {
       listError: "",
       dirty: false,
       configPending: false,
+      opened: new Set(),
+      openOrder: [],
+      open: [],
+      openBase: [],
+      openPrev: [],
+      openError: "",
+      openDirty: false,
       graceUntil: 0,
       saveSoon: debounce(() => this.flush(vs), CONFIG_SAVE_DELAY, true),
       saveLater: debounce(() => this.flush(vs), OPEN_SAVE_DELAY, true),
@@ -866,7 +878,7 @@ export default class FullBacklinksPlugin extends Plugin {
     if (sig === st.signature) return;
     st.signature = sig;
     this.sync(st, sources);
-    this.pruneOpen(st);
+    this.pruneOpen(st.view);
   }
 
   /** True once Obsidian's link index covers the whole vault (so missing backlinks really are gone). */
@@ -877,20 +889,35 @@ export default class FullBacklinksPlugin extends Plugin {
   }
 
   /**
-   * Drop remembered cards that are no longer in the pane's results (deleted, renamed, or no longer matching
-   * the query), so `open:` only lists existing notes. Skipped while indexes are still loading or the query
-   * failed, when an empty or partial result would wrongly wipe the list.
+   * Drop remembered cards whose note is in none of the panes' results any more (deleted, renamed, no longer
+   * linking here, or no longer matching a query), so `backlinks-open` only lists notes the panes show. Every
+   * pane but a query pane shows a subset of the backlinks, so a remembered note that's still a backlink stays.
+   * Skipped while indexes are still loading, and while a query pane's results aren't known (never expanded,
+   * failed, or Dataview still indexing), when an empty or partial result would wrongly wipe the list.
    */
-  private pruneOpen(st: PanelState) {
-    if (!st.config.open.length || st.error || !this.linksReady()) return;
-    if (st.config.query && !this.app.plugins?.plugins?.dataview?.index?.initialized) return;
-    const keep = st.config.open.filter(p => st.items.has(p));
-    if (keep.length === st.config.open.length) return;
-    const gone = st.config.open.filter(p => !st.items.has(p));
-    for (const p of gone) st.opened.delete(p);
-    st.openOrder = st.openOrder.filter(p => st.items.has(p));
-    st.config.open = keep;
-    this.persist(st, true);
+  private pruneOpen(vs: ViewState) {
+    if (!vs.open.length || !vs.notePath || !this.linksReady()) return;
+    const queries = vs.panes.filter(p => p.config.query.trim());
+    const gone = vs.open.filter(p => !vs.sourcePaths.has(p) && !queries.some(q => q.queryPaths?.includes(p)));
+    if (!gone.length) return;
+    if (queries.length && !this.app.plugins?.plugins?.dataview?.index?.initialized) return;
+    if (queries.some(q => q.queryPaths === null || q.error || q.deferred)) return;
+    for (const p of gone) vs.opened.delete(p);
+    vs.openOrder = vs.openOrder.filter(p => !gone.includes(p));
+    this.setOpenList(
+      vs,
+      vs.open.filter(p => !gone.includes(p)),
+    );
+  }
+
+  /** Expanded cards to remember changed: schedule the (long-delay) write. */
+  private setOpenList(vs: ViewState, next: string[]) {
+    next = next.slice(0, this.settings.maxOpen);
+    if (JSON.stringify(next) === JSON.stringify(vs.open)) return;
+    vs.open = next;
+    if (!this.settings.maxOpen) return; // not remembered: nothing is written
+    vs.openDirty = true;
+    if (!vs.configPending) vs.saveLater();
   }
 
   // ---------- panel skeleton ----------
@@ -970,8 +997,7 @@ export default class FullBacklinksPlugin extends Plugin {
       dead: false,
       ephemeral,
       deferred: true,
-      opened: new Set(config.open),
-      openOrder: [...config.open].reverse(),
+      opened: vs.opened,
       items: new Map(),
       order: [],
       needsSort: true,
@@ -1103,33 +1129,28 @@ export default class FullBacklinksPlugin extends Plugin {
 
   private showViewErrors(vs: ViewState) {
     const bad = vs.listError || vs.panes.some(p => p.parseErrors.length);
-    vs.warnEl.toggleClass("bfv-hidden", !bad);
-    vs.warnEl.setText(
+    const msgs = [
       vs.listError
         ? `⚠ ${vs.listError}. Pane settings for this note aren't saved until it's fixed.`
         : bad
           ? "⚠ A pane below has frontmatter errors; pane settings for this note aren't saved until they're fixed."
           : "",
-    );
+      vs.openError ? `⚠ ${vs.openError}. Expanded cards for this note aren't saved until it's fixed.` : "",
+    ].filter(Boolean);
+    vs.warnEl.toggleClass("bfv-hidden", !msgs.length);
+    vs.warnEl.setText(msgs.join(" "));
   }
 
   // ---------- config editing UI ----------
 
-  /**
-   * Mark a pane's settings as changed and schedule a frontmatter write (never for the built-in pane).
-   * `openOnly`: just the expanded-cards list changed, which is written after a long delay.
-   */
-  private persist(st: PanelState, openOnly = false) {
+  /** Mark a pane's settings as changed and schedule a frontmatter write (never for the built-in pane). */
+  private persist(st: PanelState) {
     if (st.ephemeral || st.dead) return;
-    this.markDirty(st.view, openOnly);
+    this.markDirty(st.view);
   }
 
-  private markDirty(vs: ViewState, openOnly = false) {
+  private markDirty(vs: ViewState) {
     vs.dirty = true;
-    if (openOnly && !vs.configPending) {
-      vs.saveLater();
-      return;
-    }
     vs.configPending = true;
     vs.saveLater.cancel();
     vs.saveSoon();
@@ -1184,7 +1205,9 @@ export default class FullBacklinksPlugin extends Plugin {
       vs.gen++;
       vs.graceUntil = 0;
     }
-    const parsed = parseList(this.app.metadataCache.getFileCache(file)?.frontmatter?.backlinks);
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    this.loadOpen(vs, fm, switched);
+    const parsed = parseList(fm?.backlinks);
     const json = listJson(parsed.entries);
     if (!switched) {
       if (json === vs.savedJson && parsed.error === vs.listError) {
@@ -1218,6 +1241,31 @@ export default class FullBacklinksPlugin extends Plugin {
     this.applyEntries(vs, parsed.entries, switched);
   }
 
+  /**
+   * Read the note's expanded cards: `backlinks-open`, or when it's absent the older per-pane `open` lists. A
+   * change made elsewhere is shown at once, unless toggles made here are waiting, which merge with it when
+   * they're written.
+   */
+  private loadOpen(vs: ViewState, fm: Record<string, unknown> | undefined, switched: boolean) {
+    const max = this.settings.maxOpen;
+    const raw = fm?.[OPEN_PROP];
+    const read = raw === undefined ? { paths: legacyOpen(fm?.backlinks, max), error: "" } : parseOpen(raw, max);
+    const same = (a: string[], b: string[]) => JSON.stringify(a) === JSON.stringify(b);
+    if (!switched) {
+      if (same(read.paths, vs.openBase) && read.error === vs.openError) return;
+      if (Date.now() < vs.graceUntil && same(read.paths, vs.openPrev)) return; // stale cache from before our write
+      vs.openError = read.error;
+      this.showViewErrors(vs);
+      if (vs.openDirty && !read.error) return; // merged with this change at write time
+    }
+    vs.openError = read.error;
+    vs.open = [...read.paths];
+    vs.openBase = vs.openPrev = read.paths;
+    vs.openDirty = false;
+    this.syncOpen(vs);
+    this.showViewErrors(vs);
+  }
+
   /** Make the panes match a list read from (or just written to) the frontmatter, reusing existing panes. */
   private applyEntries(vs: ViewState, entries: Entry[], fresh: boolean) {
     vs.baseList = entries;
@@ -1238,7 +1286,6 @@ export default class FullBacklinksPlugin extends Plugin {
         p.queryInput.value = cfg.query;
         p.titleInput.value = cfg.title;
         this.showPaneErrors(p);
-        this.syncOpen(p);
         p.updateButtons();
         if (!fresh) {
           p.renderEditors();
@@ -1253,51 +1300,94 @@ export default class FullBacklinksPlugin extends Plugin {
   }
 
   private async writeConfig(vs: ViewState) {
-    if (!vs.dirty) return;
-    vs.dirty = false;
+    const cfgDirty = vs.dirty,
+      openDirty = vs.openDirty;
+    if (!cfgDirty && !openDirty) return;
+    vs.dirty = vs.openDirty = false;
     const path = vs.notePath,
       gen = vs.gen;
     const file = path ? this.app.vault.getAbstractFileByPath(path) : null;
     if (!(file instanceof TFile)) return;
     if (typeof this.app.fileManager?.processFrontMatter !== "function") return;
-    if (this.hasErrors(vs)) return; // never rewrite what we couldn't read
+    const max = this.settings.maxOpen;
+    const writeCfg = cfgDirty && !this.hasErrors(vs); // never rewrite what we couldn't read
+    const writeOpen = openDirty && !vs.openError && max > 0;
+    if (!writeCfg && !writeOpen) return;
     // snapshot synchronously: the view may switch notes before the write runs
     const base = vs.baseList;
     const ours: Entry[] = vs.panes.map(p => ({ cfg: clone(p.config), raw: p.raw, errors: [], src: p.srcIndex }));
+    const openBase = vs.openBase,
+      openOurs = [...vs.open];
 
-    const cachedRaw = this.app.metadataCache.getFileCache(file)?.frontmatter?.backlinks;
-    const cached = parseList(cachedRaw);
-    if (cached.error || cached.entries.some(e => e.errors.length)) return;
-    const planned = merge(base, ours, cached.entries);
-    const plannedOut = planned.map(e => serializeEntry(e));
-    if (JSON.stringify(plannedOut) === JSON.stringify(cachedRaw ?? [])) {
-      this.afterWrite(vs, gen, planned, ours);
-      return;
-    }
+    /**
+     * What to write over this frontmatter: the merged pane list (null: leave `backlinks` alone) and the merged
+     * expanded cards (null: leave `backlinks-open` alone). A pane list still holding the older per-pane `open`
+     * is rewritten without it, its cards moving to `backlinks-open`.
+     */
+    const plan = (fm: Record<string, unknown> | undefined) => {
+      let changed = false;
+      let entries: Entry[] | null = null;
+      const disk = parseList(fm?.backlinks);
+      const legacy = hasLegacyOpen(fm?.backlinks);
+      if (!disk.error && !disk.entries.some(e => e.errors.length) && (writeCfg || legacy)) {
+        entries = writeCfg ? merge(base, ours, disk.entries) : disk.entries;
+        if (JSON.stringify(entries.map(e => serializeEntry(e))) !== JSON.stringify(fm?.backlinks ?? [])) changed = true;
+      }
+      let open: string[] | null = null;
+      const rawOpen = fm?.[OPEN_PROP];
+      const dOpen =
+        rawOpen === undefined ? { paths: legacyOpen(fm?.backlinks, max), error: "" } : parseOpen(rawOpen, max);
+      if (!dOpen.error && (writeOpen || (legacy && entries))) {
+        open = writeOpen ? mergeOpen(openBase, openOurs, dOpen.paths, max) : dOpen.paths;
+        if (JSON.stringify(open) !== JSON.stringify(rawOpen ?? [])) changed = true;
+      }
+      return { entries, open, changed };
+    };
 
+    const planned = plan(this.app.metadataCache.getFileCache(file)?.frontmatter);
     let written = planned;
-    vs.prevJson = vs.savedJson;
-    vs.savedJson = listJson(planned);
-    vs.baseList = planned;
-    vs.graceUntil = Date.now() + 1500;
-    try {
-      await this.app.fileManager.processFrontMatter(file, fm => {
-        const disk = parseList(fm.backlinks);
-        if (disk.error || disk.entries.some(e => e.errors.length)) {
-          written = disk.entries;
-          return;
-        } // leave it alone
-        written = merge(base, ours, disk.entries);
-        const out = written.map(e => serializeEntry(e));
-        if (JSON.stringify(out) === JSON.stringify(fm.backlinks ?? [])) return;
-        if (out.length === 0) delete fm.backlinks;
-        else fm.backlinks = out;
-      });
-    } catch (e) {
-      console.error("[backlinks-full-view] couldn't save pane settings to", path, e);
-      return;
+    if (planned.changed) {
+      if (planned.entries && writeCfg) {
+        vs.prevJson = vs.savedJson;
+        vs.savedJson = listJson(planned.entries);
+        vs.baseList = planned.entries;
+      }
+      if (planned.open) {
+        vs.openPrev = vs.openBase;
+        vs.openBase = planned.open;
+      }
+      vs.graceUntil = Date.now() + 1500;
+      try {
+        await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+          written = plan(fm);
+          if (written.entries) {
+            const out = written.entries.map(e => serializeEntry(e));
+            if (JSON.stringify(out) !== JSON.stringify(fm.backlinks ?? [])) {
+              if (out.length === 0) delete fm.backlinks;
+              else fm.backlinks = out;
+            }
+          }
+          if (written.open && JSON.stringify(written.open) !== JSON.stringify(fm[OPEN_PROP] ?? [])) {
+            if (written.open.length) fm[OPEN_PROP] = written.open;
+            else delete fm[OPEN_PROP];
+          }
+        });
+      } catch (e) {
+        console.error("[backlinks-full-view] couldn't save pane settings to", path, e);
+        return;
+      }
     }
-    this.afterWrite(vs, gen, written, ours);
+    if (written.open) this.afterOpenWrite(vs, gen, written.open, openOurs);
+    if (writeCfg && written.entries) this.afterWrite(vs, gen, written.entries, ours);
+  }
+
+  /** Record the expanded cards now on disk; if the merge brought in cards toggled elsewhere, show them. */
+  private afterOpenWrite(vs: ViewState, gen: number, written: string[], ours: string[]) {
+    if (vs.gen !== gen || !this.views.has(vs.view)) return;
+    vs.openBase = written;
+    if (vs.openDirty || JSON.stringify(written) === JSON.stringify(ours)) return; // newer toggles pending, or ours as is
+    vs.open = [...written];
+    this.syncOpen(vs);
   }
 
   /** Record what's on disk now; if the merge brought in changes made elsewhere, show them. */
@@ -1903,24 +1993,29 @@ export default class FullBacklinksPlugin extends Plugin {
     return { file: src, ver, el, comp, setOpen, invalidate, ...this.itemData(src) };
   }
 
-  /** The user expanded or collapsed a card: update recency and persist the most recent MAX_OPEN_SAVED. */
+  /**
+   * The user expanded or collapsed a card. The view's panes share one list of expanded cards, so the same
+   * note's card in the other panes follows; the most recent ones (the "Remembered expanded cards" setting)
+   * are saved in `backlinks-open`.
+   */
   private cardToggled(st: PanelState, path: string, open: boolean) {
-    st.openOrder = st.openOrder.filter(p => p !== path);
-    if (open) st.openOrder.push(path);
-    // drop remembered cards that are no longer in this pane (only once the pane has loaded its notes)
-    if (st.items.size && !st.error) st.openOrder = st.openOrder.filter(p => st.items.has(p));
-    const next = st.openOrder.slice(-MAX_OPEN_SAVED).reverse();
-    if (JSON.stringify(next) === JSON.stringify(st.config.open)) return;
-    st.config.open = next;
-    this.persist(st, true);
+    const vs = st.view;
+    vs.openOrder = vs.openOrder.filter(p => p !== path);
+    if (open) vs.openOrder.push(path);
+    for (const p of [vs.base, ...vs.panes]) {
+      const it = p && p !== st ? p.items.get(path) : undefined;
+      if (it) void it.setOpen(open);
+    }
+    this.setOpenList(vs, vs.openOrder.slice().reverse());
   }
 
-  /** Frontmatter changed from outside: expand exactly the cards it lists. */
-  private syncOpen(st: PanelState) {
-    st.opened.clear(); // mutate in place: existing cards hold a reference to this set
-    for (const p of st.config.open) st.opened.add(p);
-    st.openOrder = [...st.config.open].reverse();
-    for (const it of st.items.values()) void it.setOpen(st.opened.has(it.file.path));
+  /** The note's `backlinks-open` was read: expand exactly the cards it lists, in every pane. */
+  private syncOpen(vs: ViewState) {
+    vs.opened.clear(); // mutate in place: existing cards hold a reference to this set
+    for (const p of vs.open) vs.opened.add(p);
+    vs.openOrder = [...vs.open].reverse();
+    for (const st of [vs.base, ...vs.panes])
+      if (st) for (const it of st.items.values()) void it.setOpen(vs.opened.has(it.file.path));
   }
 
   /**

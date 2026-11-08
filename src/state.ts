@@ -48,8 +48,7 @@ export interface PanelState {
   collapsed: boolean;
   stale: boolean; // collapsed after being built and skipped by a refresh: refresh on expand
   dead: boolean; // unloaded: late debounced callbacks must do nothing
-  opened: Set<string>; // cards currently expanded; every other card starts collapsed
-  openOrder: string[]; // expanded cards in the order they were opened, most recent last
+  opened: Set<string>; // the view's expanded cards (ViewState.opened, shared by all its panes)
   items: Map<string, ItemState>;
   order: ItemState[]; // items in current DOM order
   needsSort: boolean;
@@ -96,7 +95,15 @@ export interface ViewState {
   prevJson: string; // savedJson before our last write (a cache read equal to it within graceUntil is stale)
   listError: string; // `backlinks` itself isn't a pane list
   dirty: boolean; // local edits not yet written
-  configPending: boolean; // a non-`open` edit is waiting (uses the short save delay)
+  configPending: boolean; // a pane settings edit is waiting (uses the short save delay)
+  // expanded cards: one list for the note (`backlinks-open`), shared by every pane, All backlinks included
+  opened: Set<string>; // cards expanded now (cards hold a reference: mutate in place)
+  openOrder: string[]; // expanded cards in the order they were opened, most recent last
+  open: string[]; // the list to save, most recent first (at most the "Remembered expanded cards" setting)
+  openBase: string[]; // the list as last read from / written to the frontmatter (merge base)
+  openPrev: string[]; // openBase before our last write (a cache read equal to it within graceUntil is stale)
+  openError: string; // `backlinks-open` isn't a list of paths: it isn't written until fixed
+  openDirty: boolean; // `open` changed and isn't written yet
   graceUntil: number;
   saveSoon: ReturnType<typeof debounce>;
   saveLater: ReturnType<typeof debounce>;

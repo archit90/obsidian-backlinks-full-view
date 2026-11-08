@@ -3,10 +3,14 @@ import {
   Entry,
   countRules,
   defaults,
+  hasLegacyOpen,
+  legacyOpen,
   listJson,
   merge,
+  mergeOpen,
   parseEntry,
   parseList,
+  parseOpen,
   sanitizeGroup,
   serializeEntry,
 } from "./config";
@@ -43,14 +47,12 @@ describe("parseEntry", () => {
       filter: JSON.stringify(filter),
       sort: JSON.stringify([{ prop: "file.mtime", dir: "desc" }]),
       query: " LIST FROM #a ",
-      open: ["a.md", "b.md", "a.md", ""],
     });
     expect(errors).toEqual([]);
     expect(cfg.title).toBe("Logs");
     expect(cfg.filter).toEqual(filter);
     expect(cfg.sorts).toEqual([{ prop: "file.mtime", dir: "desc" }]);
     expect(cfg.query).toBe("LIST FROM #a");
-    expect(cfg.open).toEqual(["a.md", "b.md"]); // de-duplicated, blanks dropped
   });
   it("also reads hand-written YAML values", () => {
     const { cfg, errors } = parseEntry({ sort: [{ prop: "file.name" }], filter: { children: [] } });
@@ -58,18 +60,14 @@ describe("parseEntry", () => {
     expect(cfg.sorts).toEqual([{ prop: "file.name", dir: "asc" }]);
     expect(cfg.filter).toEqual({ type: "group", mode: "and", children: [] });
   });
-  it("caps the remembered open cards", () => {
-    const open = Array.from({ length: MAX_OPEN_SAVED + 10 }, (_, i) => `n${i}.md`);
-    expect(parseEntry({ open }).cfg.open).toHaveLength(MAX_OPEN_SAVED);
+  it("ignores the older per-pane `open` (it's read by legacyOpen)", () => {
+    const { cfg, errors } = parseEntry({ title: "T", open: "nope" });
+    expect(errors).toEqual([]);
+    expect(cfg).toEqual({ ...defaults(), title: "T" });
   });
   it("reports each unreadable key and keeps defaults for it", () => {
-    const { cfg, errors } = parseEntry({ filter: "{bad", sort: "[1]", title: ["x"], open: "nope" });
-    expect(errors).toEqual([
-      "`title` isn't text",
-      "`filter` isn't valid JSON",
-      "`sort` isn't a list of sort rules",
-      "`open` isn't valid JSON",
-    ]);
+    const { cfg, errors } = parseEntry({ filter: "{bad", sort: "[1]", title: ["x"] });
+    expect(errors).toEqual(["`title` isn't text", "`filter` isn't valid JSON", "`sort` isn't a list of sort rules"]);
     expect(cfg).toEqual(defaults());
   });
   it("reports an entry that isn't a map", () => {
@@ -121,12 +119,13 @@ describe("serializeEntry", () => {
     expect(out.color).toBe("red");
     expect(out.sort).toEqual([{ prop: "file.name" }]); // same meaning: left as written
     expect(out.query).toBe("LIST");
-    expect(out).not.toHaveProperty("open"); // still default and wasn't there
+  });
+  it("drops the older per-pane `open` (it moved to `backlinks-open`)", () => {
+    expect(serializeEntry(entry({ title: "T", open: ["a.md"], color: "red" }))).toEqual({ title: "T", color: "red" });
   });
   it("round-trips through parseEntry", () => {
     const e = entry({ title: "T" });
     e.cfg.sorts = [{ prop: "file.mtime", dir: "desc" }];
-    e.cfg.open = ["a.md"];
     expect(parseEntry(serializeEntry(e)).cfg).toEqual(e.cfg);
   });
 });
@@ -194,5 +193,40 @@ describe("sort and filter values that aren't objects", () => {
     expect(sanitizeGroup({ children: [3] })).toBeNull();
     expect(sanitizeGroup({ mode: "xor", children: [] })).toBeNull();
     expect(sanitizeGroup({ children: [] })).toEqual({ type: "group", mode: "and", children: [] });
+  });
+});
+
+describe("backlinks-open", () => {
+  it("reads a list of paths: de-duplicated, blanks dropped, capped", () => {
+    expect(parseOpen(["a.md", "b.md", "a.md", "", 3], 50)).toEqual({ paths: ["a.md", "b.md"], error: "" });
+    const many = Array.from({ length: MAX_OPEN_SAVED + 10 }, (_, i) => `n${i}.md`);
+    expect(parseOpen(many, MAX_OPEN_SAVED).paths).toEqual(many.slice(0, MAX_OPEN_SAVED));
+    expect(parseOpen(["a.md", "b.md"], 1).paths).toEqual(["a.md"]);
+    expect(parseOpen(["a.md"], 0).paths).toEqual([]);
+  });
+  it("accepts a missing value or a single path, refuses anything else", () => {
+    expect(parseOpen(undefined, 50)).toEqual({ paths: [], error: "" });
+    expect(parseOpen(null, 50)).toEqual({ paths: [], error: "" });
+    expect(parseOpen("a.md", 50)).toEqual({ paths: ["a.md"], error: "" });
+    expect(parseOpen({ a: 1 }, 50).error).toMatch(/isn't a list of paths/);
+  });
+  it("reads the older per-pane lists as one, first pane first", () => {
+    const bl = [{ open: ["a.md", "b.md"] }, { title: "x" }, { open: '["b.md","c.md"]' }, { open: "{bad" }];
+    expect(legacyOpen(bl, 50)).toEqual(["a.md", "b.md", "c.md"]);
+    expect(legacyOpen({ open: ["a.md"] }, 50)).toEqual(["a.md"]);
+    expect(legacyOpen(bl, 2)).toEqual(["a.md", "b.md"]);
+    expect(legacyOpen(undefined, 50)).toEqual([]);
+    expect(hasLegacyOpen(bl)).toBe(true);
+    expect(hasLegacyOpen([{ title: "x" }])).toBe(false);
+    expect(hasLegacyOpen(undefined)).toBe(false);
+  });
+  it("merges: ours when the file didn't change, the file's when we didn't", () => {
+    expect(mergeOpen(["a"], ["b", "a"], ["a"], 50)).toEqual(["b", "a"]);
+    expect(mergeOpen(["a"], ["a"], ["c", "a"], 50)).toEqual(["c", "a"]);
+  });
+  it("merges toggles made on both sides", () => {
+    // here: b expanded, a collapsed; there: c expanded
+    expect(mergeOpen(["a", "x"], ["b", "x"], ["c", "a", "x"], 50)).toEqual(["b", "x", "c"]);
+    expect(mergeOpen(["a", "x"], ["b", "x"], ["c", "a", "x"], 2)).toEqual(["b", "x"]);
   });
 });

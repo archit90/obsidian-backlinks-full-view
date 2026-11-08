@@ -72,19 +72,24 @@ export function register(test, T) {
     await expand(1);
     eq("collapsed again", (await panes())[1].count, "2 / 4");
   });
-  test("A6", "Expanding, searching and sorting in All backlinks never writes the note", async () => {
-    await fresh();
-    const before = await read(TARGET);
-    await open(TARGET);
-    await expand(0);
-    await toggleCard(0, SRC("Plain"));
-    await typeInto(`__t.pane(0).querySelector(".bfv-filter")`, "alpha");
-    await sleep(300);
-    await click(`__t.pane(0).querySelector(".bfv-tool-btn")`); // Sort
-    await pick(`__t.pane(0).querySelector(".bfv-editor:not(.bfv-hidden) select.bfv-op")`, "desc");
-    await sleep(5600);
-    eq("file unchanged", await read(TARGET), before);
-  });
+  test(
+    "A6",
+    "Searching and sorting in All backlinks never write the note; an expanded card goes to `backlinks-open` only",
+    async () => {
+      await fresh();
+      const before = await ev(`__t.fm(${j(TARGET)}).backlinks`);
+      await open(TARGET);
+      await expand(0);
+      await toggleCard(0, SRC("Plain"));
+      await typeInto(`__t.pane(0).querySelector(".bfv-filter")`, "alpha");
+      await sleep(300);
+      await click(`__t.pane(0).querySelector(".bfv-tool-btn")`); // Sort
+      await pick(`__t.pane(0).querySelector(".bfv-editor:not(.bfv-hidden) select.bfv-op")`, "desc");
+      await sleep(5600);
+      eq("pane settings unchanged", await ev(`__t.fm(${j(TARGET)}).backlinks`), before);
+      eq("expanded card saved", await ev(`__t.fm(${j(TARGET)})["backlinks-open"]`), [SRC("Plain")]);
+    },
+  );
   test("A7", "Panes start collapsed every time the note opens (collapsed state isn't saved)", async () => {
     await open(TARGET);
     await expand(1);
@@ -256,19 +261,20 @@ export function register(test, T) {
     );
     check("dataview list rendered", ok);
   });
-  test("B4", "Card toggles are saved in `open`, most recent first, 5 s later (not before)", async () => {
+  test("B4", "Card toggles are saved in `backlinks-open`, most recent first, 5 s later (not before)", async () => {
     await fresh();
     await open(TARGET);
     await expand(1);
     await toggleCard(1, SRC("Plain"));
     await toggleCard(1, SRC("Heading"));
     await sleep(1500);
-    eq("not yet", await ev(`__t.fm(${j(TARGET)}).backlinks[0].open ?? null`), null);
+    eq("not yet", await ev(`__t.fm(${j(TARGET)})["backlinks-open"] ?? null`), null);
     await sleep(4500);
-    eq("saved", await ev(`__t.fm(${j(TARGET)}).backlinks[0].open`), [SRC("Heading"), SRC("Plain")]);
+    eq("saved", await ev(`__t.fm(${j(TARGET)})["backlinks-open"]`), [SRC("Heading"), SRC("Plain")]);
     await toggleCard(1, SRC("Heading"));
     await sleep(5600);
-    eq("collapse removes", await ev(`__t.fm(${j(TARGET)}).backlinks[0].open`), [SRC("Plain")]);
+    eq("collapse removes", await ev(`__t.fm(${j(TARGET)})["backlinks-open"]`), [SRC("Plain")]);
+    check("not in the pane's entry", !("open" in (await ev(`__t.fm(${j(TARGET)}).backlinks[0]`))));
   });
   test("B5", "A pending card toggle is written at once when the view switches notes", async () => {
     await fresh();
@@ -277,7 +283,7 @@ export function register(test, T) {
     await toggleCard(1, SRC("Block"));
     await open("_bfv/Lonely.md", "lp", "same");
     await sleep(600);
-    eq("flushed", await ev(`__t.fm(${j(TARGET)}).backlinks[0].open`), [SRC("Block")]);
+    eq("flushed", await ev(`__t.fm(${j(TARGET)})["backlinks-open"]`), [SRC("Block")]);
   });
   test("B6", "Listed cards start expanded", async () => {
     await open(TARGET);
@@ -299,7 +305,7 @@ export function register(test, T) {
         for (const c of cards) { c.querySelector(".bfv-item-header").dispatchEvent(new MouseEvent("click", { bubbles: true })); } return cards.length; })()`);
       await ev(`__t.closeAll()`);
       await sleep(800);
-      const open50 = await ev(`__t.fm(${j(hub)}).backlinks[0].open`);
+      const open50 = await ev(`__t.fm(${j(hub)})["backlinks-open"]`);
       eq("50 saved", open50.length, 50);
       const last = await ev(`[...document.querySelectorAll(".bfv-item")].length`);
       check("cleanup", last === 0);
@@ -307,6 +313,72 @@ export function register(test, T) {
       await ev(`app.vault.modify(app.vault.getAbstractFileByPath(${j(hub)}), ${j(orig)})`);
       await sleep(300);
     }
+  });
+  test(
+    "B10",
+    "One list for all panes: a card expanded in one pane is expanded in every pane that shows it",
+    async () => {
+      await fresh();
+      await open(TARGET);
+      await expand(0);
+      await expand(1);
+      await toggleCard(1, SRC("Plain"));
+      eq("All backlinks follows", (await panes())[0].items.find(i => i.path === SRC("Plain")).open, true);
+      await toggleCard(0, SRC("Plain"));
+      eq("collapsing there collapses here", (await panes())[1].items.find(i => i.path === SRC("Plain")).open, false);
+      await toggleCard(0, SRC("Block"));
+      await ev(`__t.closeAll()`);
+      await sleep(600);
+      eq("saved once for the note", await ev(`__t.fm(${j(TARGET)})["backlinks-open"]`), [SRC("Block")]);
+      await open(TARGET);
+      await expand(0);
+      await expand(1);
+      const p = await panes();
+      eq(
+        "expanded in both panes on reopen",
+        [p[0].items.filter(i => i.open).map(i => i.path), p[1].items.filter(i => i.open).map(i => i.path)],
+        [[SRC("Block")], [SRC("Block")]],
+      );
+    },
+  );
+  test("B11", '"Remembered expanded cards": only that many are saved; 0 saves none', async () => {
+    await fresh();
+    const set = n =>
+      ev(`(async () => { const p = __t.plugin(); p.settings.maxOpen = ${n}; await p.saveSettings(); return 1; })()`);
+    try {
+      await set(2);
+      await open(TARGET);
+      await expand(1);
+      for (const n of ["Plain", "Block", "Heading"]) await toggleCard(1, SRC(n));
+      await ev(`__t.closeAll()`);
+      await sleep(600);
+      eq("2 most recent", await ev(`__t.fm(${j(TARGET)})["backlinks-open"]`), [SRC("Heading"), SRC("Block")]);
+      await fresh();
+      await set(0);
+      await open(TARGET);
+      await expand(1);
+      await toggleCard(1, SRC("Plain"));
+      await ev(`__t.closeAll()`);
+      await sleep(600);
+      eq("0: nothing written", await ev(`__t.fm(${j(TARGET)})["backlinks-open"] ?? null`), null);
+    } finally {
+      await set(50);
+    }
+  });
+  test("B12", "A `backlinks-open` that isn't a list of paths is flagged and left alone", async () => {
+    await fresh();
+    await replaceIn(TARGET, "backlinks:", "backlinks-open:\n  bad: 1\nbacklinks:");
+    await sleep(500);
+    await open(TARGET);
+    check(
+      "warning shown",
+      /backlinks-open/.test(await ev(`__t.root().querySelector(":scope > .bfv-config-error")?.textContent ?? ""`)),
+    );
+    await expand(1);
+    await toggleCard(1, SRC("Plain"));
+    await ev(`__t.closeAll()`);
+    await sleep(600);
+    eq("left as written", await ev(`__t.fm(${j(TARGET)})["backlinks-open"]`), { bad: 1 });
   });
   test("B8", "An open card re-renders when its note changes", async () => {
     await fresh();
@@ -771,19 +843,24 @@ export function register(test, T) {
     eq("both kept", [bl.title, bl.query], ["Local", 'LIST FROM "_bfv/src"']);
   });
 
-  // ===== G. `open`: pruning, renames, deletes =====
-  test("G1", "Paths that left the pane are pruned from `open`", async () => {
-    await fresh();
-    await open("_bfv/Open list.md");
-    await expand(1);
-    eq(
-      "listed card expanded",
-      (await panes())[1].items.filter(i => i.open).map(i => i.path),
-      [SRC("Plain")],
-    );
-    await sleep(5600);
-    eq("pruned", await ev(`__t.fm("_bfv/Open list.md").backlinks[0].open`), [SRC("Plain")]);
-  });
+  // ===== G. `backlinks-open`: pruning, renames, deletes =====
+  test(
+    "G1",
+    "The older per-pane `open` is read, pruned of notes no pane shows, and moved to `backlinks-open`",
+    async () => {
+      await fresh();
+      await open("_bfv/Open list.md");
+      await expand(1);
+      eq(
+        "listed card expanded",
+        (await panes())[1].items.filter(i => i.open).map(i => i.path),
+        [SRC("Plain")],
+      );
+      await sleep(5600);
+      eq("pruned and moved", await ev(`__t.fm("_bfv/Open list.md")["backlinks-open"]`), [SRC("Plain")]);
+      eq("pane entry without `open`", await ev(`__t.fm("_bfv/Open list.md").backlinks`), [{ title: "Opened" }]);
+    },
+  );
   test("G2", "A renamed source keeps its card expanded under the new path", async () => {
     await fresh();
     await ev(`__t.closeAll()`);
@@ -803,7 +880,7 @@ export function register(test, T) {
       [true, false],
     );
     await sleep(5600);
-    eq("open updated", await ev(`__t.fm(${j(TARGET)}).backlinks[0].open`), ["_bfv/src/PlainR.md"]);
+    eq("open updated", await ev(`__t.fm(${j(TARGET)})["backlinks-open"]`), ["_bfv/src/PlainR.md"]);
   });
   test("G3", "A deleted source disappears and is pruned", async () => {
     await toggleCard(1, SRC("Unresolved"));
@@ -812,7 +889,7 @@ export function register(test, T) {
     await waitFor(`!__t.card(1, ${j(SRC("Unresolved"))})`, 3000);
     eq("count", (await panes())[1].count, "9");
     await sleep(5600);
-    eq("pruned", await ev(`__t.fm(${j(TARGET)}).backlinks[0].open`), ["_bfv/src/PlainR.md"]);
+    eq("pruned", await ev(`__t.fm(${j(TARGET)})["backlinks-open"]`), ["_bfv/src/PlainR.md"]);
   });
   test(
     "G4",
@@ -1159,9 +1236,14 @@ export function register(test, T) {
       check("invalid query: Dataview error", p[3].empty.startsWith("Dataview:"), p[3].empty);
       check("no note links: hint", p[4].empty.includes("no note links"), p[4].empty);
       await sleep(5600);
-      eq("open not pruned when the query lists no notes", await ev(`__t.fm("_bfv/Queries.md").backlinks[3].open`), [
-        SRC("Plain"),
-      ]);
+      eq(
+        "remembered cards not pruned when a query fails or lists no notes (nothing written)",
+        [
+          await ev(`__t.fm("_bfv/Queries.md").backlinks[3].open`),
+          await ev(`__t.fm("_bfv/Queries.md")["backlinks-open"] ?? null`),
+        ],
+        [[SRC("Plain")], null],
+      );
     },
   );
   test("K2", "Typing a query in a new pane: title becomes Query, results follow, the query is written", async () => {

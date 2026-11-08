@@ -1,4 +1,3 @@
-import { MAX_OPEN_SAVED } from "./constants";
 import { isPlainObject } from "./values";
 
 // ---------- config model (mirrors Bases: nested and/or/not filters + multi-sort) ----------
@@ -25,7 +24,6 @@ export interface Settings {
   filter: Group;
   sorts: SortRule[];
   query: string;
-  open: string[];
 }
 
 export const defaults = (): Settings => ({
@@ -33,7 +31,6 @@ export const defaults = (): Settings => ({
   filter: { type: "group", mode: "and", children: [] },
   sorts: [{ prop: "file.name", dir: "asc" }],
   query: "", // optional Dataview query that supplies the notes instead of backlinks
-  open: [], // paths of expanded cards, most recent first (at most MAX_OPEN_SAVED)
 });
 export const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v));
 
@@ -51,7 +48,6 @@ export const KEYS: [string, keyof Settings][] = [
   ["filter", "filter"],
   ["sort", "sorts"],
   ["query", "query"],
-  ["open", "open"],
 ];
 
 export interface PropDef {
@@ -115,7 +111,7 @@ export function parseEntry(e: unknown): Omit<Entry, "src"> {
   const errors: string[] = [];
   if (e === null || e === undefined) return { cfg, raw: null, errors };
   if (!isPlainObject(e))
-    return { cfg, raw: null, errors: ["the entry isn't a set of pane keys (title, filter, sort, query, open)"] };
+    return { cfg, raw: null, errors: ["the entry isn't a set of pane keys (title, filter, sort, query)"] };
   const r = e;
   if (typeof r.title === "string" || typeof r.title === "number") cfg.title = String(r.title).trim();
   else if (r.title != null) errors.push("`title` isn't text");
@@ -134,15 +130,7 @@ export function parseEntry(e: unknown): Omit<Entry, "src"> {
   }
   if (typeof r.query === "string") cfg.query = r.query.trim();
   else if (r.query != null) errors.push("`query` isn't text");
-  const ov = jsonField(r.open, "open", errors);
-  if (ov !== undefined) {
-    if (Array.isArray(ov)) {
-      cfg.open = [...new Set(ov.filter((x: unknown): x is string => typeof x === "string" && x !== ""))].slice(
-        0,
-        MAX_OPEN_SAVED,
-      );
-    } else errors.push("`open` isn't a list of paths");
-  }
+  // `open` (expanded cards, per pane) is an older format: read by legacyOpen, dropped on the next write
   return { cfg, raw: r, errors };
 }
 
@@ -216,11 +204,11 @@ export function serializeEntry(e: Entry): Record<string, unknown> {
     filter: countRules(c.filter) === 0 ? null : JSON.stringify(c.filter),
     sort: JSON.stringify(c.sorts) === JSON.stringify(def.sorts) ? null : JSON.stringify(c.sorts),
     query: c.query || null,
-    open: c.open.length ? [...c.open] : null,
   };
   if (!e.raw) return Object.fromEntries(Object.entries(vals).filter(([, v]) => v !== null)); // a new pane: set keys only
   const was = parseEntry(e.raw).cfg;
   const out: Record<string, unknown> = { ...e.raw };
+  delete out.open; // the older per-pane expanded cards: they live in `backlinks-open` now
   for (const [k, f] of KEYS) {
     if (k in e.raw && JSON.stringify(was[f]) === JSON.stringify(c[f])) continue;
     if (vals[k] === null) {
@@ -231,4 +219,60 @@ export function serializeEntry(e: Entry): Record<string, unknown> {
     out[k] = vals[k];
   }
   return out;
+}
+
+// ---------- the `backlinks-open` property: expanded cards, one list for the note (pure, unit-tested) ----------
+
+/** Paths as written: strings only, blanks dropped, de-duplicated, at most `max` (most recent first). */
+function cleanPaths(v: unknown[], max: number): string[] {
+  return [...new Set(v.filter((x: unknown): x is string => typeof x === "string" && x !== ""))].slice(0, max);
+}
+
+/** The `backlinks-open` value: a list of paths (a single path is accepted too); error when it's neither. */
+export function parseOpen(raw: unknown, max: number): { paths: string[]; error: string } {
+  if (raw === null || raw === undefined || raw === "") return { paths: [], error: "" };
+  if (typeof raw === "string") return { paths: cleanPaths([raw], max), error: "" };
+  if (!Array.isArray(raw)) return { paths: [], error: "The `backlinks-open` property isn't a list of paths" };
+  return { paths: cleanPaths(raw, max), error: "" };
+}
+
+/** Expanded cards in the older format (`open` inside each `backlinks` entry), as one list: first pane first. */
+export function legacyOpen(backlinks: unknown, max: number): string[] {
+  const arr = Array.isArray(backlinks) ? backlinks : isPlainObject(backlinks) ? [backlinks] : [];
+  const all: unknown[] = [];
+  for (const e of arr) {
+    if (!isPlainObject(e)) continue;
+    let v: unknown = e.open;
+    if (typeof v === "string") {
+      try {
+        v = JSON.parse(v);
+      } catch {
+        continue;
+      }
+    }
+    if (Array.isArray(v)) all.push(...(v as unknown[]));
+  }
+  return cleanPaths(all, max);
+}
+
+/** True when some `backlinks` entry still holds the older `open` key. */
+export function hasLegacyOpen(backlinks: unknown): boolean {
+  const arr = Array.isArray(backlinks) ? backlinks : isPlainObject(backlinks) ? [backlinks] : [];
+  return arr.some(e => isPlainObject(e) && "open" in e);
+}
+
+/**
+ * Three-way merge of this view's expanded cards (`ours`, most recent first) with the list on disk, against
+ * the list this view last saw (`base`): cards expanded here come first, cards collapsed here are dropped,
+ * and the rest of the disk list follows.
+ */
+export function mergeOpen(base: string[], ours: string[], disk: string[], max: number): string[] {
+  const same = (a: string[], b: string[]) => JSON.stringify(a) === JSON.stringify(b);
+  if (same(ours, base)) return disk.slice(0, max);
+  if (same(disk, base)) return ours.slice(0, max);
+  const was = new Set(base),
+    now = new Set(ours);
+  const added = ours.filter(p => !was.has(p));
+  const removed = new Set(base.filter(p => !now.has(p)));
+  return cleanPaths([...added, ...ours.filter(p => was.has(p)), ...disk.filter(p => !removed.has(p))], max);
 }
