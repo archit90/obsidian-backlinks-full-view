@@ -28,14 +28,14 @@ the whole rendered note, in panes below the note you're reading. It replaces the
 ## Install with BRAT
 
 1. Install **BRAT** (Obsidian42 - BRAT) from Community plugins.
-2. BRAT → **Add beta plugin** → `{{REPO}}` → Add plugin.
+2. BRAT → **Add beta plugin** → `archit90/obsidian-backlinks-full-view` → Add plugin.
 3. Enable **Backlinks Full View** in Community plugins. Turn off the core **Backlinks** plugin.
 
 Optional: Dataview, for query panes and `bfv.embed`.
 
 ## Notes
 
-Works on its own. With the optional [Editor Multiple Lanes](https://github.com/{{OWNER}}/obsidian-editor-multiple-lanes)
+Works on its own. With the optional [Editor Multiple Lanes](https://github.com/archit90/obsidian-editor-multiple-lanes)
 plugin, the panes also show under lane cards.
 
 Requires Obsidian 1.15 or later. It uses some Obsidian internals (checked against 1.15.0), so a new Obsidian
@@ -45,9 +45,16 @@ version may need an update.
 
 ```sh
 npm install
-npm run build   # main.js
-npm test        # unit tests
+npm run build                    # main.js
+npm test                         # unit tests
+npm run check                    # format, lint, typecheck, unit tests, build, smoke load: before every commit
+npm run deploy -- <vault> …      # build and copy into vaults that have the plugin installed (--install adds it)
 ```
+
+Releasing: `npm version patch` (or `minor` / `major`) bumps `package.json`, `manifest.json` and `versions.json` and
+tags the commit with the version; `git push --follow-tags` then runs the release workflow, which checks, builds and
+publishes the GitHub release BRAT installs from. End-to-end tests: see `TEST-CASES.md` and `SPEC.md`
+(Development).
 
 ## Licence
 
