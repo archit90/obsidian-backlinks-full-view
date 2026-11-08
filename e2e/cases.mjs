@@ -209,24 +209,42 @@ export function register(test, T) {
   );
 
   // ===== B. Cards =====
-  test("B1", "Card header: title link and folder; the header toggles, the title doesn't", async () => {
-    await fresh();
-    await open(TARGET);
-    await expand(1);
-    const h = await ev(
-      `(() => { const c = __t.card(1, ${j(SRC("Plain"))}); return [c.querySelector(".bfv-item-title").textContent, c.querySelector(".bfv-item-path").textContent.replace(/\u200E/g, ""), c.classList.contains("is-collapsed")]; })()`,
-    );
-    eq("header", h, ["Plain", "_bfv/src/", true]);
-    await click(`__t.card(1, ${j(SRC("Plain"))}).querySelector(".bfv-item-path")`);
-    await sleep(400);
-    check(
-      "expanded by a header click",
-      await ev(`!__t.card(1, ${j(SRC("Plain"))}).classList.contains("is-collapsed")`),
-    );
-    await click(`__t.card(1, ${j(SRC("Plain"))}).querySelector(".bfv-chevron")`);
-    await sleep(200);
-    check("collapsed again", await ev(`__t.card(1, ${j(SRC("Plain"))}).classList.contains("is-collapsed")`));
-  });
+  test(
+    "B1",
+    "Card header: full path, or title link and folder (setting); the header toggles, the title doesn't",
+    async () => {
+      await fresh();
+      await open(TARGET);
+      await expand(1);
+      const header = () =>
+        ev(
+          `(() => { const c = __t.card(1, ${j(SRC("Plain"))}); return [c.querySelector(".bfv-item-title").textContent, c.querySelector(".bfv-item-path")?.textContent.replace(/\u200E/g, "") ?? null, c.classList.contains("is-collapsed")]; })()`,
+        );
+      eq("full path (default)", await header(), ["_bfv/src/Plain", null, true]);
+      await ev(
+        `(() => { const p = __t.plugin(); p.settings.embedFullPath = false; p.applyCardTitles(); return 1; })()`,
+      );
+      await sleep(300);
+      try {
+        eq("setting off: name and folder", await header(), ["Plain", "_bfv/src/", true]);
+        await click(`__t.card(1, ${j(SRC("Plain"))}).querySelector(".bfv-item-path")`);
+        await sleep(400);
+        check(
+          "expanded by a header click",
+          await ev(`!__t.card(1, ${j(SRC("Plain"))}).classList.contains("is-collapsed")`),
+        );
+        await click(`__t.card(1, ${j(SRC("Plain"))}).querySelector(".bfv-chevron")`);
+        await sleep(200);
+        check("collapsed again", await ev(`__t.card(1, ${j(SRC("Plain"))}).classList.contains("is-collapsed")`));
+      } finally {
+        await ev(
+          `(async () => { const p = __t.plugin(); p.settings.embedFullPath = true; await p.saveSettings(); p.applyCardTitles(); return 1; })()`,
+        );
+      }
+      await sleep(300);
+      eq("setting on again", (await header())[0], "_bfv/src/Plain");
+    },
+  );
   test(
     "B2",
     "An expanded card shows read-only properties (links, chips, #tags; no `backlinks`), then the text",
@@ -1449,7 +1467,7 @@ export function register(test, T) {
         eq("card border", s.border, "solid");
         const setFull = v =>
           ev(
-            `(async () => { const p = __t.plugin(); p.settings.embedFullPath = ${v}; await p.saveSettings(); p.rerenderNoteEmbeds(); await __t.sleep(900); return 1; })()`,
+            `(async () => { const p = __t.plugin(); p.settings.embedFullPath = ${v}; await p.saveSettings(); p.applyCardTitles(); await __t.sleep(300); return 1; })()`,
           );
         try {
           await setFull(false);
@@ -1469,6 +1487,49 @@ export function register(test, T) {
         eq("an embed inside it is a collapsed card too", o.nested, [true]);
       },
     );
+  }
+  for (const mode of ["reading", "lp"]) {
+    test(`Q8-${mode}`, "An embed in a list item or a sentence stays on its line; one alone is a block", async () => {
+      await fresh();
+      await embFixtures();
+      const p = "_bfv/emb/Inline.md";
+      await ev(`(async () => { const t = ${j("Alone:\n\n![[_bfv/emb/Inner]]\n\n- one\n- ![[_bfv/emb/Inner]]\n- three\n\nSee ![[_bfv/emb/Inner]] here.\n")};
+        const f = app.vault.getAbstractFileByPath(${j(p)}); if (f) await app.vault.modify(f, t); else await app.vault.create(${j(p)}, t); return 1; })()`);
+      await open(p, mode);
+      await sleep(1200);
+      const look = () =>
+        ev(`(() => { const root = [...__t.view().containerEl.querySelectorAll(".markdown-reading-view, .markdown-source-view")].find(e => e.offsetParent);
+          const es = [...root.querySelectorAll(".bfv-note-embed")];
+          const line = e => e.closest(".cm-line, li, p") ?? e.parentElement;
+          return es.map(e => ({ inline: e.classList.contains("bfv-inline"), dy: Math.round(e.getBoundingClientRect().top - line(e).getBoundingClientRect().top),
+            w: Math.round(e.getBoundingClientRect().width), lw: Math.round(line(e).getBoundingClientRect().width) })); })()`);
+      const a = await look();
+      eq(
+        "inline: alone, list item, sentence",
+        a.map(x => x.inline),
+        [false, true, true],
+      );
+      check("alone: full width", a[0].w >= a[0].lw - 2, a[0]);
+      check(
+        "list item and sentence: on their line, as wide as the title",
+        a.slice(1).every(x => x.dy < 8 && x.w < x.lw / 2),
+        a,
+      );
+      const cur = () => ev(`__t.view().getMode() === "source" ? __t.view().editor.getCursor().line : -1`);
+      const before = await cur();
+      // a real click on the header's chevron
+      await click(
+        `[...__t.view().containerEl.querySelectorAll(".markdown-reading-view, .markdown-source-view")].find(e => e.offsetParent).querySelectorAll(".bfv-note-embed")[1].querySelector(".bfv-chevron")`,
+      );
+      await sleep(800);
+      eq("toggling doesn't move the cursor onto the embed's line", await cur(), before);
+      const b = (await look())[1];
+      check(
+        "expanded in the list item: still on the bullet's line, most of its width",
+        b.inline && b.dy < 8 && b.w > b.lw * 0.8,
+        b,
+      );
+    });
   }
   test("Q2", "Source mode shows the embed's text; no card", async () => {
     await fresh();
@@ -1562,7 +1623,7 @@ export function register(test, T) {
     await ev(`(() => { __t.pane(1).querySelector(".bfv-header").click(); return 1; })()`);
     await sleep(600);
     eq("cards", (await panes())[1].items.length, 10);
-    await ev(`(() => { __t.card(1, ${j(SRC("Plain"))}).querySelector(".bfv-item-path").click(); return 1; })()`);
+    await ev(`(() => { __t.card(1, ${j(SRC("Plain"))}).querySelector(".bfv-chevron").click(); return 1; })()`);
     check("card rendered", await waitFor(`__t.card(1, ${j(SRC("Plain"))}).textContent.includes("billing")`, 3000));
     await ev(`(() => { __t.card(1, ${j(SRC("Heading"))}).querySelector(".bfv-item-title").click(); return 1; })()`);
     await sleep(800);

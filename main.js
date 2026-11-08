@@ -396,13 +396,13 @@ var FullBacklinksSettingTab = class extends import_obsidian.PluginSettingTab {
         this.plugin.rerenderNoteEmbeds();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Full path in embedded note cards").setDesc(
-      "On: an embedded note's card (![[note]], and bfv.embed() in DataviewJS) is titled with the note's full path (folder/sub/name). Off: the note's name, with its folder in a faint label on the right, as in the panes."
+    new import_obsidian.Setting(containerEl).setName("Full path in note cards").setDesc(
+      "On: every note card (in the backlinks panes, embedded notes ![[note]], and bfv.embed() in DataviewJS) is titled with the note's full path (folder/sub/name). Off: the note's name, with its folder in a faint label on the right."
     ).addToggle(
       (t) => t.setValue(this.plugin.settings.embedFullPath).onChange(async (v) => {
         this.plugin.settings.embedFullPath = v;
         await this.plugin.saveSettings();
-        this.plugin.rerenderNoteEmbeds();
+        this.plugin.applyCardTitles();
       })
     );
     new import_obsidian.Setting(containerEl).setName("Remembered expanded cards").setDesc(
@@ -555,6 +555,14 @@ var NoteEmbedCard = class extends import_obsidian2.Component {
     this.plugin.buildEmbedCard(this.ctx, this.file, this);
   }
 };
+function isInlineEmbed(el) {
+  const p = el.parentElement;
+  if (!p || p.classList.contains("cm-content")) return false;
+  if (p.classList.contains("cm-line") || el.closest("li")) return true;
+  return [...p.childNodes].some(
+    (n) => n === el ? false : n.nodeType === Node.TEXT_NODE ? !!n.textContent?.trim() : n.nodeName !== "BR"
+  );
+}
 var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
   constructor() {
     super(...arguments);
@@ -2275,7 +2283,8 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
       src,
       st.component,
       st.opened,
-      (path, open) => this.cardToggled(st, path, open)
+      (path, open) => this.cardToggled(st, path, open),
+      this.settings.embedFullPath
     );
     return { file: src, ver, el, comp, setOpen, invalidate, ...this.itemData(src) };
   }
@@ -2361,12 +2370,10 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     const ichev = ih.createSpan({ cls: "bfv-chevron" });
     ih.createEl("a", {
       cls: "bfv-item-title internal-link",
-      text: fullPath ? src.path.replace(/\.md$/, "") : src.basename,
       href: src.path,
       attr: { "data-href": src.path }
     });
-    const folder = src.parent && src.parent.path !== "/" ? src.parent.path : "";
-    if (folder && !fullPath) ih.createSpan({ cls: "bfv-item-path", text: `\u200E${folder}/\u200E` });
+    this.setCardTitle(ih, src, fullPath);
     const content = item.createDiv({ cls: "bfv-item-content markdown-rendered" });
     let rendered = false;
     let isOpen = false;
@@ -2516,6 +2523,19 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     let opened = this.embedOpen.get(ctx.sourcePath);
     if (!opened) this.embedOpen.set(ctx.sourcePath, opened = /* @__PURE__ */ new Set());
     const card = this.buildCard(el, file, owner, opened, void 0, this.settings.embedFullPath);
+    const mark = (tries) => {
+      if (!el.isConnected) {
+        if (tries > 0) el.win.setTimeout(() => mark(tries - 1), 100);
+        return;
+      }
+      el.toggleClass("bfv-inline", isInlineEmbed(el));
+    };
+    el.win.requestAnimationFrame(() => mark(5));
+    const header = el.querySelector(":scope > .bfv-item > .bfv-item-header");
+    for (const type of ["mousedown", "click"])
+      header?.addEventListener(type, (e) => {
+        if (!e.target.closest("a")) e.stopPropagation();
+      });
     owner.registerEvent(
       this.app.vault.on("modify", (f) => {
         if (f.path === file.path) card.invalidate();
@@ -2527,6 +2547,39 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
       })
     );
     return card;
+  }
+  /**
+   * A card header's title: the note's name with its folder in a faint label on the right, or (setting "Full path
+   * in note cards") the full path, without `.md`, and no label.
+   */
+  setCardTitle(header, src, fullPath) {
+    const title = header.querySelector(".bfv-item-title");
+    if (title) title.textContent = fullPath ? src.path.replace(/\.md$/, "") : src.basename;
+    header.querySelector(".bfv-item-path")?.remove();
+    const folder = src.parent && src.parent.path !== "/" ? src.parent.path : "";
+    if (folder && !fullPath) header.createSpan({ cls: "bfv-item-path", text: `\u200E${folder}/\u200E` });
+  }
+  /**
+   * The "Full path in note cards" setting changed: retitle every card in place (panes, embeds, DataviewJS), in
+   * every window and canvas card editor, without redrawing any note.
+   */
+  applyCardTitles() {
+    const docs = /* @__PURE__ */ new Set();
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const root = leaf.view.containerEl;
+      docs.add(root.ownerDocument);
+      root.querySelectorAll("iframe").forEach((f) => {
+        try {
+          if (f.contentDocument) docs.add(f.contentDocument);
+        } catch {
+        }
+      });
+    });
+    for (const doc of docs)
+      doc.querySelectorAll(".bfv-item > .bfv-item-header").forEach((h) => {
+        const f = this.app.vault.getAbstractFileByPath(h.parentElement?.dataset.bfvPath ?? "");
+        if (f instanceof import_obsidian2.TFile) this.setCardTitle(h, f, this.settings.embedFullPath);
+      });
   }
   /** Redraws every open note so embeds follow the setting (and Obsidian's come back on unload). */
   rerenderNoteEmbeds() {

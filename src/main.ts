@@ -136,6 +136,20 @@ class NoteEmbedCard extends Component implements EmbedComponent {
   }
 }
 
+/**
+ * True when an embed sits inside a line of text rather than alone in its block: in Live Preview a widget in a
+ * `.cm-line` (a block embed is a widget of its own in `.cm-content`); in Reading view one in a list item, or
+ * beside text or other elements in its paragraph.
+ */
+function isInlineEmbed(el: HTMLElement): boolean {
+  const p = el.parentElement;
+  if (!p || p.classList.contains("cm-content")) return false;
+  if (p.classList.contains("cm-line") || el.closest("li")) return true;
+  return [...p.childNodes].some(n =>
+    n === el ? false : n.nodeType === Node.TEXT_NODE ? !!n.textContent?.trim() : n.nodeName !== "BR",
+  );
+}
+
 export default class FullBacklinksPlugin extends Plugin {
   override settings: PluginSettings = { ...PLUGIN_DEFAULTS };
   private views = new Map<NoteView, ViewState>();
@@ -1987,8 +2001,13 @@ export default class FullBacklinksPlugin extends Plugin {
   // ---------- cards ----------
 
   private createItem(st: PanelState, src: TFile, ver: number): ItemState {
-    const { el, comp, setOpen, invalidate } = this.buildCard(st.listEl, src, st.component, st.opened, (path, open) =>
-      this.cardToggled(st, path, open),
+    const { el, comp, setOpen, invalidate } = this.buildCard(
+      st.listEl,
+      src,
+      st.component,
+      st.opened,
+      (path, open) => this.cardToggled(st, path, open),
+      this.settings.embedFullPath,
     );
     return { file: src, ver, el, comp, setOpen, invalidate, ...this.itemData(src) };
   }
@@ -2076,7 +2095,7 @@ export default class FullBacklinksPlugin extends Plugin {
     parentComp: Component,
     opened: Set<string>,
     onToggle?: (path: string, open: boolean) => void,
-    fullPath = false, // the title is the note's full path, no separate folder label (embed cards, a setting)
+    fullPath = false, // the title is the note's full path, no separate folder label (setting "Full path in note cards")
   ) {
     const comp = new Component();
     parentComp.addChild(comp);
@@ -2087,13 +2106,10 @@ export default class FullBacklinksPlugin extends Plugin {
     const ichev = ih.createSpan({ cls: "bfv-chevron" });
     ih.createEl("a", {
       cls: "bfv-item-title internal-link",
-      text: fullPath ? src.path.replace(/\.md$/, "") : src.basename,
       href: src.path,
       attr: { "data-href": src.path },
     });
-    const folder = src.parent && src.parent.path !== "/" ? src.parent.path : "";
-    // drawn right-to-left (a long folder is cut from the left): the LRMs keep a leading `_` or `.` in place
-    if (folder && !fullPath) ih.createSpan({ cls: "bfv-item-path", text: `\u200E${folder}/\u200E` });
+    this.setCardTitle(ih, src, fullPath);
 
     const content = item.createDiv({ cls: "bfv-item-content markdown-rendered" });
 
@@ -2262,6 +2278,22 @@ export default class FullBacklinksPlugin extends Plugin {
     let opened = this.embedOpen.get(ctx.sourcePath);
     if (!opened) this.embedOpen.set(ctx.sourcePath, (opened = new Set()));
     const card = this.buildCard(el, file, owner, opened, undefined, this.settings.embedFullPath);
+    // an embed inside a line (a list item, a sentence) is drawn inline there, not as a block of its own
+    const mark = (tries: number) => {
+      if (!el.isConnected) {
+        if (tries > 0) el.win.setTimeout(() => mark(tries - 1), 100);
+        return;
+      }
+      el.toggleClass("bfv-inline", isInlineEmbed(el));
+    };
+    el.win.requestAnimationFrame(() => mark(5));
+    // toggling the card isn't editing: the click mustn't reach Live Preview, which would put the cursor on the
+    // embed's line and show its `![[…]]` source (the title link still navigates)
+    const header = el.querySelector<HTMLElement>(":scope > .bfv-item > .bfv-item-header");
+    for (const type of ["mousedown", "click"] as const)
+      header?.addEventListener(type, e => {
+        if (!(e.target as HTMLElement).closest("a")) e.stopPropagation();
+      });
     // the panes re-render a card when its note changes; an embed card does the same
     owner.registerEvent(
       this.app.vault.on("modify", f => {
@@ -2274,6 +2306,43 @@ export default class FullBacklinksPlugin extends Plugin {
       }),
     );
     return card;
+  }
+
+  /**
+   * A card header's title: the note's name with its folder in a faint label on the right, or (setting "Full path
+   * in note cards") the full path, without `.md`, and no label.
+   */
+  private setCardTitle(header: HTMLElement, src: TFile, fullPath: boolean) {
+    const title = header.querySelector(".bfv-item-title");
+    if (title) title.textContent = fullPath ? src.path.replace(/\.md$/, "") : src.basename;
+    header.querySelector(".bfv-item-path")?.remove();
+    const folder = src.parent && src.parent.path !== "/" ? src.parent.path : "";
+    // drawn right-to-left (a long folder is cut from the left): the LRMs keep a leading `_` or `.` in place
+    if (folder && !fullPath) header.createSpan({ cls: "bfv-item-path", text: `\u200E${folder}/\u200E` });
+  }
+
+  /**
+   * The "Full path in note cards" setting changed: retitle every card in place (panes, embeds, DataviewJS), in
+   * every window and canvas card editor, without redrawing any note.
+   */
+  applyCardTitles() {
+    const docs = new Set<Document>();
+    this.app.workspace.iterateAllLeaves(leaf => {
+      const root = leaf.view.containerEl;
+      docs.add(root.ownerDocument);
+      root.querySelectorAll("iframe").forEach(f => {
+        try {
+          if (f.contentDocument) docs.add(f.contentDocument);
+        } catch {
+          // a cross-origin frame holds no cards
+        }
+      });
+    });
+    for (const doc of docs)
+      doc.querySelectorAll<HTMLElement>(".bfv-item > .bfv-item-header").forEach(h => {
+        const f = this.app.vault.getAbstractFileByPath(h.parentElement?.dataset.bfvPath ?? "");
+        if (f instanceof TFile) this.setCardTitle(h, f, this.settings.embedFullPath);
+      });
   }
 
   /** Redraws every open note so embeds follow the setting (and Obsidian's come back on unload). */

@@ -49,9 +49,8 @@
 .bfv-item-title {
   font-weight: 500;
 }
-/* embed cards show the note's full path as their title: a long one wraps instead of overflowing */
-.bfv-note-embed .bfv-item-title,
-.bfv-embeds .bfv-item-title {
+/* a card titled with the note's full path (a setting): a long one wraps instead of overflowing */
+.bfv-item-title {
   overflow-wrap: anywhere;
 }
 .bfv-item-content {
@@ -248,4 +247,19 @@
 }
 .bfv-note-embed > .bfv-item {
   margin: 0;
+}
+/* an embed inside a line (a list item, a sentence: main.ts isInlineEmbed) stays on that line: collapsed, a
+   compact card as wide as its title; expanded, it fills the rest of the line's width from there */
+.bfv-note-embed.bfv-inline {
+  display: inline-block;
+  vertical-align: baseline;
+  margin: 0;
+  max-width: 100%;
+}
+.bfv-note-embed.bfv-inline > .bfv-item.is-collapsed > .bfv-item-header {
+  padding: 0 8px;
+}
+.bfv-note-embed.bfv-inline:has(> .bfv-item:not(.is-collapsed)) {
+  vertical-align: top;
+  width: calc(100% - 1.5em);
 }
