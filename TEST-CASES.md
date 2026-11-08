@@ -6,7 +6,8 @@ the DevTools protocol with real mouse and key input (`e2e/run.mjs`, cases in `e2
 `<select>` dropdowns and clicks inside a popout window are driven by events (CDP input can't reach them); every
 other click, hover and keystroke is real input.
 
-**Final full run: 2026-11-07, after embeds as cards: 90/90 automated cases, 268/268 checks PASS** (`e2e/results.md`), plus
+**Final full run: 2026-11-08, after `backlinks-open`: 92/92 automated cases, 279/279 checks PASS** (`e2e/results.md`; that run
+named B10–B12 B9–B11, renumbered after it), plus
 V1–V3 by eye and the TYPING / BUILD gates. Status `fixed` = failed in the first run, root-caused and fixed in this
 round (see the report), passing now.
 
