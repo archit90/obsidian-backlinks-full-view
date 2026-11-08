@@ -1,7 +1,7 @@
 # Backlinks Full View e2e results
 
-Run 2026-11-08T20:20:41.323Z against a sandbox vault (Obsidian 1.15.0), other plugins: dataview, editor-multiple-lanes.
-351/352 checks, 108/109 cases passed, 0 skipped. ResizeObserver loop warnings (benign): 0.
+Run 2026-11-08T21:31:49.722Z against a sandbox vault (Obsidian 1.15.0), other plugins: dataview, editor-multiple-lanes.
+352/352 checks, 109/109 cases passed, 0 skipped. ResizeObserver loop warnings (benign): 0.
 
 | Case | Result | Failed checks |
 |---|---|---|
@@ -39,7 +39,7 @@ Run 2026-11-08T20:20:41.323Z against a sandbox vault (Obsidian 1.15.0), other pl
 | C3-source | PASS |  |
 | C4-source | PASS |  |
 | C1-reading | PASS |  |
-| C2-reading | FAIL | ctrl+alt: split |
+| C2-reading | PASS |  |
 | C3-reading | PASS |  |
 | C4-reading | PASS |  |
 | C5 | PASS |  |

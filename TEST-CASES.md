@@ -25,9 +25,10 @@ writes `e2e/results-together.md`. For scale, `OBS_VAULT=<a big vault>` copies th
 suite writes only `_bfv/` there, and the hub if it has none).
 
 **Last runs (2026-11-08):** alone: 329/329 checks, 101/101 cases passed, 8 skipped (also after the switch to the
-plugin's own debounce). Together: 352/352 checks, 109/109 cases passed, 0 skipped; after the debounce switch
-351/352: **C2-reading "ctrl+alt: split" is intermittent together with Lanes** (failed 2 of 5 runs, passes alone;
-open: the check may find a Lanes card leaf of the same note).
+plugin's own debounce). Together: 352/352 checks, 109/109 cases passed, 0 skipped. C2-reading's "ctrl+alt: split"
+failed 2 of 5 together-runs after the debounce switch: its check took the first leaf of the note, which could
+be a Lanes card; it now ignores card leaves (as the tab count does) and lists the leaves if it fails. 10 reruns
+pass.
 
 **Needs:** a case that tests working with another plugin names it (`dataview`, `editor-multiple-lanes`, or
 `core:<id>` for a core plugin) and is skipped without it. The contract cases (I3–I5, K4, K5, L2, L3, C7, Q9) simulate

@@ -1,6 +1,6 @@
 # Backlinks Full View e2e results
 
-Run 2026-11-08T20:12:58.887Z against a sandbox vault (Obsidian 1.15.0), other plugins: none.
+Run 2026-11-08T21:55:27.349Z against a sandbox vault (Obsidian 1.15.0), other plugins: none.
 329/329 checks, 101/101 cases passed, 8 skipped. ResizeObserver loop warnings (benign): 0.
 
 | Case | Result | Failed checks |

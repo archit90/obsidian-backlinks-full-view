@@ -526,10 +526,20 @@ export function register(test, T) {
       await waitFor(`!!__t.card(1, ${j(SRC("Embed"))})`);
       await click(`__t.card(1, ${j(SRC("Embed"))}).querySelector(".bfv-item-title")`, { ctrl: true, alt: true });
       await sleep(600);
+      // a leaf of the note outside the original's tab group; Lanes' card leaves (together runs) don't count, as in
+      // leafCount: a card showing the same note isn't the split
       const split = await waitFor(
-        `(() => { const l = app.workspace.getLeavesOfType("markdown").find(l => l.view.file?.path === ${j(SRC("Embed"))}); return !!l && l.parent !== __t.leaf.parent; })()`,
+        `app.workspace.getLeavesOfType("markdown").some(l => !__t.inLanes(l) && l.view.file?.path === ${j(SRC("Embed"))} && l.parent !== __t.leaf.parent)`,
       );
-      check("ctrl+alt: split", split);
+      check(
+        "ctrl+alt: split",
+        split,
+        split
+          ? undefined
+          : await ev(
+              `JSON.stringify(app.workspace.getLeavesOfType("markdown").map(l => ({ p: l.view.file?.path, inLanes: __t.inLanes(l), sameGroup: l.parent === __t.leaf.parent })))`,
+            ),
+      );
     });
     test(`C3-${mode}`, `${label}: links inside a card resolve from the card's note; property links work`, async () => {
       await ev(`__t.closeAll()`);
@@ -1091,7 +1101,8 @@ export function register(test, T) {
     await click(`__t.root().querySelector(".bfv-add")`);
     await sleep(1000);
     eq("writes to the new path", await ev(`__t.fm("_bfv/Lonely2.md").backlinks`), [{}]);
-    await ev(`app.vault.delete(app.vault.getAbstractFileByPath("_bfv/Lonely2.md"))`);
+    // not awaited over CDP: deleting the open note tears its view down, and that promise can be collected unsettled
+    await ev(`(() => { void app.vault.delete(app.vault.getAbstractFileByPath("_bfv/Lonely2.md")); return 1; })()`);
     await sleep(1000);
     check("no panes left in the emptied view", !(await ev(`!!__t.root()?.isShown()`)));
   });
