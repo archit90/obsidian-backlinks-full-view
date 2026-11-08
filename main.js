@@ -364,6 +364,7 @@ var import_obsidian = require("obsidian");
 var PLUGIN_DEFAULTS = {
   canvas: true,
   noteEmbeds: true,
+  embedFullPath: true,
   maxOpen: MAX_OPEN_SAVED
 };
 function maxOpenOf(v) {
@@ -391,6 +392,15 @@ var FullBacklinksSettingTab = class extends import_obsidian.PluginSettingTab {
     ).addToggle(
       (t) => t.setValue(this.plugin.settings.noteEmbeds).onChange(async (v) => {
         this.plugin.settings.noteEmbeds = v;
+        await this.plugin.saveSettings();
+        this.plugin.rerenderNoteEmbeds();
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("Full path in embedded note cards").setDesc(
+      "On: an embedded note's card (![[note]], and bfv.embed() in DataviewJS) is titled with the note's full path (folder/sub/name). Off: the note's name, with its folder in a faint label on the right, as in the panes."
+    ).addToggle(
+      (t) => t.setValue(this.plugin.settings.embedFullPath).onChange(async (v) => {
+        this.plugin.settings.embedFullPath = v;
         await this.plugin.saveSettings();
         this.plugin.rerenderNoteEmbeds();
       })
@@ -620,7 +630,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
           total++;
           if (total > limit) continue;
           if (!opts.collapsed) opened.add(f.path);
-          this.buildCard(wrap, f, parentComp, opened, void 0, true);
+          this.buildCard(wrap, f, parentComp, opened, void 0, this.settings.embedFullPath);
         }
         if (total > limit) {
           wrap.createDiv({
@@ -2505,7 +2515,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     this.wireLinks(el);
     let opened = this.embedOpen.get(ctx.sourcePath);
     if (!opened) this.embedOpen.set(ctx.sourcePath, opened = /* @__PURE__ */ new Set());
-    const card = this.buildCard(el, file, owner, opened, void 0, true);
+    const card = this.buildCard(el, file, owner, opened, void 0, this.settings.embedFullPath);
     owner.registerEvent(
       this.app.vault.on("modify", (f) => {
         if (f.path === file.path) card.invalidate();

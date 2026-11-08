@@ -1447,6 +1447,18 @@ export function register(test, T) {
           [true, "_bfv/emb/Target", null],
         );
         eq("card border", s.border, "solid");
+        const setFull = v =>
+          ev(
+            `(async () => { const p = __t.plugin(); p.settings.embedFullPath = ${v}; await p.saveSettings(); p.rerenderNoteEmbeds(); await __t.sleep(900); return 1; })()`,
+          );
+        try {
+          await setFull(false);
+          const n = await embState();
+          eq("setting off: name and folder label", [n.title, n.folder], ["Target", "_bfv/emb/"]);
+        } finally {
+          await setFull(true);
+        }
+        eq("setting on again: full path", (await embState()).title, "_bfv/emb/Target");
         check("nothing rendered while collapsed", !s.body && s.props === null, s);
         await click(embHeader);
         await sleep(900);

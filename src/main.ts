@@ -2076,7 +2076,7 @@ export default class FullBacklinksPlugin extends Plugin {
     parentComp: Component,
     opened: Set<string>,
     onToggle?: (path: string, open: boolean) => void,
-    fullPath = false, // embed cards: the title is the note's full path (no separate folder label)
+    fullPath = false, // the title is the note's full path, no separate folder label (embed cards, a setting)
   ) {
     const comp = new Component();
     parentComp.addChild(comp);
@@ -2261,7 +2261,7 @@ export default class FullBacklinksPlugin extends Plugin {
     this.wireLinks(el);
     let opened = this.embedOpen.get(ctx.sourcePath);
     if (!opened) this.embedOpen.set(ctx.sourcePath, (opened = new Set()));
-    const card = this.buildCard(el, file, owner, opened, undefined, true);
+    const card = this.buildCard(el, file, owner, opened, undefined, this.settings.embedFullPath);
     // the panes re-render a card when its note changes; an embed card does the same
     owner.registerEvent(
       this.app.vault.on("modify", f => {
@@ -2334,7 +2334,7 @@ export default class FullBacklinksPlugin extends Plugin {
         total++;
         if (total > limit) continue; // counted, not rendered
         if (!opts.collapsed) opened.add(f.path); // bfv.embed() keeps opening cards unless asked not to
-        this.buildCard(wrap, f, parentComp, opened, undefined, true);
+        this.buildCard(wrap, f, parentComp, opened, undefined, this.settings.embedFullPath);
       }
       if (total > limit) {
         wrap.createDiv({

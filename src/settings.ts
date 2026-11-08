@@ -6,12 +6,14 @@ import { MAX_OPEN_SAVED } from "./constants";
 export interface PluginSettings {
   canvas: boolean; // show panes on canvas note cards (while editing, and in reading view when the note opts in)
   noteEmbeds: boolean; // render `![[note]]` embeds as collapsible cards, as in the panes
+  embedFullPath: boolean; // embed cards (and bfv.embed cards) are titled with the note's full path
   maxOpen: number; // expanded cards remembered per note in `backlinks-open` (0: not remembered)
 }
 
 export const PLUGIN_DEFAULTS: PluginSettings = {
   canvas: true,
   noteEmbeds: true,
+  embedFullPath: true,
   maxOpen: MAX_OPEN_SAVED,
 };
 
@@ -53,6 +55,19 @@ export class FullBacklinksSettingTab extends PluginSettingTab {
       .addToggle(t =>
         t.setValue(this.plugin.settings.noteEmbeds).onChange(async v => {
           this.plugin.settings.noteEmbeds = v;
+          await this.plugin.saveSettings();
+          this.plugin.rerenderNoteEmbeds();
+        }),
+      );
+    new Setting(containerEl)
+      .setName("Full path in embedded note cards")
+      .setDesc(
+        "On: an embedded note's card (![[note]], and bfv.embed() in DataviewJS) is titled with the note's full path " +
+          "(folder/sub/name). Off: the note's name, with its folder in a faint label on the right, as in the panes.",
+      )
+      .addToggle(t =>
+        t.setValue(this.plugin.settings.embedFullPath).onChange(async v => {
+          this.plugin.settings.embedFullPath = v;
           await this.plugin.saveSettings();
           this.plugin.rerenderNoteEmbeds();
         }),
