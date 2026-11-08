@@ -20,7 +20,7 @@ import { writeFixturesExpr } from "./fixtures.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN = path.dirname(HERE);
-const ID = "obsidian-backlinks-full-view";
+const ID = "backlinks-full-view";
 const args = process.argv.slice(2);
 const opt = n => (args.includes(n) ? args[args.indexOf(n) + 1] : undefined);
 const FILTER = opt("--filter") ? new RegExp(opt("--filter"), "i") : null;
@@ -155,7 +155,9 @@ async function shot(name) {
 }
 
 const cases = [];
-const test = (id, title, fn) => cases.push({ id, title, fn });
+// a case that tests working with another plugin names it (`{ needs: "<plugin id>" }`) and is skipped without it:
+// Backlinks Full View itself needs none of them
+const test = (id, title, fn, opts = {}) => cases.push({ id, title, fn, needs: opts.needs });
 const T = {
   ev,
   check,
@@ -198,13 +200,20 @@ if (!args.includes("--no-deploy")) {
 }
 // normal tabs stay tabs (Editor Lanes would move them into lanes)
 await ev(
-  `(async () => { const p = app.plugins.plugins["obsidian-editor-lanes"]; if (p) { p.settings.lanesOnly = false; p.settings.showBacklinks = true; await p.saveSettings?.(); } return true; })()`,
+  `(async () => { const p = app.plugins.plugins["editor-multiple-lanes"]; if (p) { p.settings.lanesOnly = false; p.settings.showBacklinks = true; await p.saveSettings?.(); } return true; })()`,
 );
 await ev(`__t.errors.splice(0)`);
 const started = Date.now();
 let roLoops = 0;
+const loaded = new Set(await ev(`Object.keys(app.plugins.plugins)`));
+const skipped = [];
 for (const k of cases) {
   if (FILTER && !FILTER.test(k.id + " " + k.title)) continue;
+  if (k.needs && !loaded.has(k.needs)) {
+    skipped.push(k.id);
+    console.log(`SKIP ${k.id} (${k.needs} not enabled)`);
+    continue;
+  }
   current = k.id;
   try {
     await k.fn(T);
@@ -232,6 +241,7 @@ console.log(
   `\n${pass}/${results.length} checks passed; ${ids.length - failedIds.length}/${ids.length} cases passed in ${Math.round((Date.now() - started) / 1000)} s`,
 );
 if (failedIds.length) console.log("FAILED: " + failedIds.join(", "));
+if (skipped.length) console.log("SKIPPED (another plugin not enabled): " + skipped.join(", "));
 console.log(`ResizeObserver loop warnings (benign, not failed): ${roLoops}`);
 const lines = [
   "# Backlinks Full View e2e results",
@@ -246,6 +256,7 @@ const lines = [
     return `| ${id} | ${bad.length ? "FAIL" : "PASS"} | ${bad.map(b => b.name + (b.detail === undefined ? "" : ": `" + JSON.stringify(b.detail).slice(0, 160) + "`")).join("; ")} |`;
   }),
 ];
+if (skipped.length) lines.splice(4, 0, `Skipped, another plugin not enabled: ${skipped.join(", ")}.`);
 if (!FILTER) fs.writeFileSync(path.join(HERE, "results.md"), lines.join("\n") + "\n");
 c.close();
 process.exit(failedIds.length ? 1 : 0);

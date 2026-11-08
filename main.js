@@ -605,7 +605,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     //
     //   bfv.embed(dv, dv.pages('#project'));                    // full, collapsible notes
     //   bfv.embed(dv, dv.pages('"Inbox"'), { collapsed: true }); // start collapsed
-    //   (bfv is a global alias of app.plugins.plugins["obsidian-backlinks-full-view"].api)
+    //   (bfv is a global alias of app.plugins.plugins["backlinks-full-view"].api)
     this.api = {
       embed: (target, pages, opts = {}) => {
         const container = isEl(target) ? target : target.container;

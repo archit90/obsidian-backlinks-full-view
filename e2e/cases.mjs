@@ -1017,52 +1017,62 @@ export function register(test, T) {
   });
 
   // ===== I. Where the panes appear =====
-  const lanes = `app.plugins.plugins["obsidian-editor-lanes"]`;
-  test("I1", "Editor Lanes card: panes under the note; cards and links work there", async () => {
-    await fresh();
-    await ev(`__t.closeAll()`);
-    await ev(
-      `(async () => { ${lanes}.settings.lanesOnly = true; await ${lanes}.saveSettings(); await app.workspace.openLinkText(${j(TARGET)}, "", false); return 1; })()`,
-    );
-    await sleep(1500);
-    const leaf = await ev(
-      `(() => { let f = null; app.workspace.iterateAllLeaves(l => { if (l.view?.file?.path === ${j(TARGET)} && l.view.containerEl.closest(".lanes-view")) f = l; }); __t.leaf = f; return !!f; })()`,
-    );
-    check("card leaf found", leaf);
-    await waitFor(`!!__t.root()?.querySelector(".bfv-panel")`, 3000);
-    eq(
-      "panes",
-      (await panes()).map(p => [p.title, p.count]),
-      [
-        ["All backlinks", "10"],
-        ["Mine", "10"],
-      ],
-    );
-    await expand(1);
-    await toggleCard(1, SRC("Plain"));
-    check("card rendered", await waitFor(`__t.card(1, ${j(SRC("Plain"))}).textContent.includes("billing")`, 3000));
-    await click(`__t.card(1, ${j(SRC("Heading"))}).querySelector(".bfv-item-title")`);
-    await sleep(1200);
-    check(
-      "title link opened the note in a lane",
+  const lanes = `app.plugins.plugins["editor-multiple-lanes"]`;
+  test(
+    "I1",
+    "Editor Lanes card: panes under the note; cards and links work there",
+    async () => {
+      await fresh();
+      await ev(`__t.closeAll()`);
       await ev(
-        `(() => { let ok = false; app.workspace.iterateAllLeaves(l => { if (l.view?.file?.path === ${j(SRC("Heading"))} && l.view.containerEl.closest(".lanes-view")) ok = true; }); return ok; })()`,
-      ),
-    );
-  });
-  test("I2", "Editor Lanes 'Show backlinks panes under lane notes' off: no panes in lanes; on: back", async () => {
-    await ev(
-      `(async () => { ${lanes}.settings.showBacklinks = false; await ${lanes}.settingsChanged("backlinks"); return 1; })()`,
-    );
-    await sleep(1200);
-    eq("none in lanes", await ev(`document.querySelectorAll(".lanes-view .bfv-container").length`), 0);
-    await ev(
-      `(async () => { ${lanes}.settings.showBacklinks = true; await ${lanes}.settingsChanged("backlinks"); return 1; })()`,
-    );
-    await sleep(1200);
-    check("back", await ev(`document.querySelectorAll(".lanes-view .bfv-container").length > 0`));
-    await ev(`(async () => { ${lanes}.settings.lanesOnly = false; await ${lanes}.saveSettings(); return 1; })()`);
-  });
+        `(async () => { ${lanes}.settings.lanesOnly = true; await ${lanes}.saveSettings(); await app.workspace.openLinkText(${j(TARGET)}, "", false); return 1; })()`,
+      );
+      await sleep(1500);
+      const leaf = await ev(
+        `(() => { let f = null; app.workspace.iterateAllLeaves(l => { if (l.view?.file?.path === ${j(TARGET)} && l.view.containerEl.closest(".lanes-view")) f = l; }); __t.leaf = f; return !!f; })()`,
+      );
+      check("card leaf found", leaf);
+      await waitFor(`!!__t.root()?.querySelector(".bfv-panel")`, 3000);
+      eq(
+        "panes",
+        (await panes()).map(p => [p.title, p.count]),
+        [
+          ["All backlinks", "10"],
+          ["Mine", "10"],
+        ],
+      );
+      await expand(1);
+      await toggleCard(1, SRC("Plain"));
+      check("card rendered", await waitFor(`__t.card(1, ${j(SRC("Plain"))}).textContent.includes("billing")`, 3000));
+      await click(`__t.card(1, ${j(SRC("Heading"))}).querySelector(".bfv-item-title")`);
+      await sleep(1200);
+      check(
+        "title link opened the note in a lane",
+        await ev(
+          `(() => { let ok = false; app.workspace.iterateAllLeaves(l => { if (l.view?.file?.path === ${j(SRC("Heading"))} && l.view.containerEl.closest(".lanes-view")) ok = true; }); return ok; })()`,
+        ),
+      );
+    },
+    { needs: "editor-multiple-lanes" },
+  );
+  test(
+    "I2",
+    "Editor Lanes 'Show backlinks panes under lane notes' off: no panes in lanes; on: back",
+    async () => {
+      await ev(
+        `(async () => { ${lanes}.settings.showBacklinks = false; await ${lanes}.settingsChanged("backlinks"); return 1; })()`,
+      );
+      await sleep(1200);
+      eq("none in lanes", await ev(`document.querySelectorAll(".lanes-view .bfv-container").length`), 0);
+      await ev(
+        `(async () => { ${lanes}.settings.showBacklinks = true; await ${lanes}.settingsChanged("backlinks"); return 1; })()`,
+      );
+      await sleep(1200);
+      check("back", await ev(`document.querySelectorAll(".lanes-view .bfv-container").length > 0`));
+      await ev(`(async () => { ${lanes}.settings.lanesOnly = false; await ${lanes}.saveSettings(); return 1; })()`);
+    },
+    { needs: "editor-multiple-lanes" },
+  );
   const canvasNode = id => `__t.canvas.nodes.get(${j(id)})`;
   const cardRoot = id =>
     `(${canvasNode(id)}.nodeEl.querySelector("iframe")?.contentDocument ?? document).querySelector('.canvas-node[data-bfv-test="${id}"] .bfv-container, .bfv-container')`;
@@ -1317,21 +1327,21 @@ export function register(test, T) {
   test("M1", "Show diagnostics", async () => {
     await ev(`__t.closeAll()`);
     await open(TARGET);
-    await ev(`app.commands.executeCommandById("obsidian-backlinks-full-view:diagnostics")`);
+    await ev(`app.commands.executeCommandById("backlinks-full-view:diagnostics")`);
     await sleep(300);
     const n = (await ev(`__t.notices()`)).find(t => t.includes("Backlinks Full View diagnostics")) ?? "";
     check("notice", n.includes("Panes: 1 + All backlinks") && n.includes("Note views tracked"), n);
     await ev(`__t.clearNotices()`);
   });
   test("M2", "Disabling the plugin removes every pane and the global; enabling brings them back", async () => {
-    await ev(`(async () => { await app.plugins.disablePlugin(${j("obsidian-backlinks-full-view")}); return 1; })()`);
+    await ev(`(async () => { await app.plugins.disablePlugin(${j("backlinks-full-view")}); return 1; })()`);
     await sleep(500);
     eq(
       "gone",
       [await ev(`document.querySelectorAll(".bfv-container").length`), await ev(`typeof window.bfv`)],
       [0, "undefined"],
     );
-    await ev(`(async () => { await app.plugins.enablePlugin(${j("obsidian-backlinks-full-view")}); return 1; })()`);
+    await ev(`(async () => { await app.plugins.enablePlugin(${j("backlinks-full-view")}); return 1; })()`);
     check("back", await waitFor(`!!__t.root()?.querySelector(".bfv-panel")`, 4000));
   });
   test("M3", "A pending edit is written when the plugin unloads", async () => {
@@ -1341,7 +1351,7 @@ export function register(test, T) {
     await expand(1);
     await typeInto(`__t.pane(1).querySelector(".bfv-title-input")`, "Unload");
     await ev(
-      `(async () => { await app.plugins.disablePlugin(${j("obsidian-backlinks-full-view")}); await __t.sleep(600); await app.plugins.enablePlugin(${j("obsidian-backlinks-full-view")}); return 1; })()`,
+      `(async () => { await app.plugins.disablePlugin(${j("backlinks-full-view")}); await __t.sleep(600); await app.plugins.enablePlugin(${j("backlinks-full-view")}); return 1; })()`,
     );
     await sleep(500);
     eq("written", await ev(`__t.fm(${j(TARGET)}).backlinks[0].title`), "Unload");
@@ -1354,7 +1364,7 @@ export function register(test, T) {
       await fresh();
       await ev(`__t.closeAll()`);
       await open("_bfv/Short.md");
-      const id = j("obsidian-backlinks-full-view");
+      const id = j("backlinks-full-view");
       const fns = `(() => { const v = __t.view(); return [Object.getPrototypeOf(v).setMode, Object.getPrototypeOf(v.editMode).updateBottomPadding]; })()`;
       const r = await ev(`(async () => {
       const on = ${fns};
@@ -1428,7 +1438,7 @@ export function register(test, T) {
       await mk(${j(EMB.target)}, "---\\ntype: zettel\\ncreated: 2026-11-07\\n---\\n# Target\\n\\nBody text of target.\\n\\n## Sec\\n\\nSection text.\\n\\n![[_bfv/emb/Inner]]\\n");
       await mk(${j(EMB.inner)}, "Inner body.\\n");
       await mk(${j(EMB.self)}, "Self ![[_bfv/emb/Self]]\\n");
-      app.plugins.plugins["obsidian-backlinks-full-view"].embedOpen.clear();
+      app.plugins.plugins["backlinks-full-view"].embedOpen.clear();
       await mk(${j(EMB.host)}, "Intro\\n\\n![[_bfv/emb/Target]]\\n\\n![[_bfv/emb/Target#Sec]]\\n\\nAfter\\n");
       await __t.sleep(300);
       return 1; })()`);
@@ -1563,13 +1573,13 @@ export function register(test, T) {
     await open(EMB.host, "reading");
     await sleep(600);
     await ev(
-      `(async () => { const p = app.plugins.plugins["obsidian-backlinks-full-view"]; p.settings.noteEmbeds = false; await p.saveSettings(); p.rerenderNoteEmbeds(); return 1; })()`,
+      `(async () => { const p = app.plugins.plugins["backlinks-full-view"]; p.settings.noteEmbeds = false; await p.saveSettings(); p.rerenderNoteEmbeds(); return 1; })()`,
     );
     await sleep(1200);
     let s = await embState();
     eq("setting off: Obsidian's embeds", [s.cards, s.native], [0, ["_bfv/emb/Target", "_bfv/emb/Target#Sec"]]);
     await ev(
-      `(async () => { const p = app.plugins.plugins["obsidian-backlinks-full-view"]; p.settings.noteEmbeds = true; await p.saveSettings(); p.rerenderNoteEmbeds(); return 1; })()`,
+      `(async () => { const p = app.plugins.plugins["backlinks-full-view"]; p.settings.noteEmbeds = true; await p.saveSettings(); p.rerenderNoteEmbeds(); return 1; })()`,
     );
     await sleep(1200);
     s = await embState();
@@ -1581,14 +1591,14 @@ export function register(test, T) {
     await open(EMB.host, "lp");
     await sleep(700);
     await ev(
-      `(async () => { await app.plugins.disablePlugin("obsidian-backlinks-full-view"); await __t.sleep(1500); return 1; })()`,
+      `(async () => { await app.plugins.disablePlugin("backlinks-full-view"); await __t.sleep(1500); return 1; })()`,
     );
     const off = await ev(
       `(() => { const r = [...app.workspace.getLeavesOfType("markdown")].map(l => l.view.containerEl).find(e => e.querySelector('.internal-embed[src="_bfv/emb/Target"]')); return r ? [r.querySelectorAll(".bfv-note-embed").length, r.querySelectorAll('.markdown-embed[src="_bfv/emb/Target"]').length] : null; })()`,
     );
     eq("disabled: Obsidian's embed", off, [0, 1]);
     await ev(
-      `(async () => { await app.plugins.enablePlugin("obsidian-backlinks-full-view"); await __t.sleep(2000); return 1; })()`,
+      `(async () => { await app.plugins.enablePlugin("backlinks-full-view"); await __t.sleep(2000); return 1; })()`,
     );
     const on = await ev(
       `(() => { const r = [...app.workspace.getLeavesOfType("markdown")].map(l => l.view.containerEl).find(e => e.querySelector('.internal-embed[src="_bfv/emb/Target"]')); return r ? r.querySelectorAll(".bfv-note-embed").length : null; })()`,

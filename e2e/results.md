@@ -1,6 +1,6 @@
 # Backlinks Full View e2e results
 
-Run 2026-11-08T14:26:47.078Z against vault (Obsidian 1.15.0).
+Run 2026-11-08T15:42:54.959Z against vault (Obsidian 1.15.0).
 295/295 checks, 95/95 cases passed. ResizeObserver loop warnings (benign): 0.
 
 | Case | Result | Failed checks |
@@ -92,8 +92,8 @@ Run 2026-11-08T14:26:47.078Z against vault (Obsidian 1.15.0).
 | N2 | PASS |  |
 | Q1-reading | PASS |  |
 | Q1-lp | PASS |  |
-| Q7-reading | PASS |  |
-| Q7-lp | PASS |  |
+| Q8-reading | PASS |  |
+| Q8-lp | PASS |  |
 | Q2 | PASS |  |
 | Q3 | PASS |  |
 | Q4 | PASS |  |

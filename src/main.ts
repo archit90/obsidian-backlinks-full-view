@@ -2359,7 +2359,7 @@ export default class FullBacklinksPlugin extends Plugin {
   //
   //   bfv.embed(dv, dv.pages('#project'));                    // full, collapsible notes
   //   bfv.embed(dv, dv.pages('"Inbox"'), { collapsed: true }); // start collapsed
-  //   (bfv is a global alias of app.plugins.plugins["obsidian-backlinks-full-view"].api)
+  //   (bfv is a global alias of app.plugins.plugins["backlinks-full-view"].api)
 
   api = {
     embed: (target: EmbedTarget, pages: unknown, opts: EmbedOptions = {}): HTMLElement => {
