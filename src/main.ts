@@ -2076,6 +2076,7 @@ export default class FullBacklinksPlugin extends Plugin {
     parentComp: Component,
     opened: Set<string>,
     onToggle?: (path: string, open: boolean) => void,
+    fullPath = false, // embed cards: the title is the note's full path (no separate folder label)
   ) {
     const comp = new Component();
     parentComp.addChild(comp);
@@ -2086,13 +2087,13 @@ export default class FullBacklinksPlugin extends Plugin {
     const ichev = ih.createSpan({ cls: "bfv-chevron" });
     ih.createEl("a", {
       cls: "bfv-item-title internal-link",
-      text: src.basename,
+      text: fullPath ? src.path.replace(/\.md$/, "") : src.basename,
       href: src.path,
       attr: { "data-href": src.path },
     });
     const folder = src.parent && src.parent.path !== "/" ? src.parent.path : "";
     // drawn right-to-left (a long folder is cut from the left): the LRMs keep a leading `_` or `.` in place
-    if (folder) ih.createSpan({ cls: "bfv-item-path", text: `\u200E${folder}/\u200E` });
+    if (folder && !fullPath) ih.createSpan({ cls: "bfv-item-path", text: `\u200E${folder}/\u200E` });
 
     const content = item.createDiv({ cls: "bfv-item-content markdown-rendered" });
 
@@ -2260,7 +2261,7 @@ export default class FullBacklinksPlugin extends Plugin {
     this.wireLinks(el);
     let opened = this.embedOpen.get(ctx.sourcePath);
     if (!opened) this.embedOpen.set(ctx.sourcePath, (opened = new Set()));
-    const card = this.buildCard(el, file, owner, opened);
+    const card = this.buildCard(el, file, owner, opened, undefined, true);
     // the panes re-render a card when its note changes; an embed card does the same
     owner.registerEvent(
       this.app.vault.on("modify", f => {
@@ -2333,7 +2334,7 @@ export default class FullBacklinksPlugin extends Plugin {
         total++;
         if (total > limit) continue; // counted, not rendered
         if (!opts.collapsed) opened.add(f.path); // bfv.embed() keeps opening cards unless asked not to
-        this.buildCard(wrap, f, parentComp, opened);
+        this.buildCard(wrap, f, parentComp, opened, undefined, true);
       }
       if (total > limit) {
         wrap.createDiv({

@@ -49,6 +49,11 @@
 .bfv-item-title {
   font-weight: 500;
 }
+/* embed cards show the note's full path as their title: a long one wraps instead of overflowing */
+.bfv-note-embed .bfv-item-title,
+.bfv-embeds .bfv-item-title {
+  overflow-wrap: anywhere;
+}
 .bfv-item-content {
   padding: 4px 14px 10px;
 }

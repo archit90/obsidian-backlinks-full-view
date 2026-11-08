@@ -620,7 +620,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
           total++;
           if (total > limit) continue;
           if (!opts.collapsed) opened.add(f.path);
-          this.buildCard(wrap, f, parentComp, opened);
+          this.buildCard(wrap, f, parentComp, opened, void 0, true);
         }
         if (total > limit) {
           wrap.createDiv({
@@ -2342,7 +2342,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
    * read and rendered when the card is first expanded, so large panes stay cheap. `invalidate()` re-renders
    * an open card (debounced) or makes a collapsed one render afresh on its next expand.
    */
-  buildCard(parentEl, src, parentComp, opened, onToggle) {
+  buildCard(parentEl, src, parentComp, opened, onToggle, fullPath = false) {
     const comp = new import_obsidian2.Component();
     parentComp.addChild(comp);
     const item = parentEl.createDiv({ cls: "bfv-item" });
@@ -2351,12 +2351,12 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     const ichev = ih.createSpan({ cls: "bfv-chevron" });
     ih.createEl("a", {
       cls: "bfv-item-title internal-link",
-      text: src.basename,
+      text: fullPath ? src.path.replace(/\.md$/, "") : src.basename,
       href: src.path,
       attr: { "data-href": src.path }
     });
     const folder = src.parent && src.parent.path !== "/" ? src.parent.path : "";
-    if (folder) ih.createSpan({ cls: "bfv-item-path", text: `\u200E${folder}/\u200E` });
+    if (folder && !fullPath) ih.createSpan({ cls: "bfv-item-path", text: `\u200E${folder}/\u200E` });
     const content = item.createDiv({ cls: "bfv-item-content markdown-rendered" });
     let rendered = false;
     let isOpen = false;
@@ -2505,7 +2505,7 @@ var FullBacklinksPlugin = class extends import_obsidian2.Plugin {
     this.wireLinks(el);
     let opened = this.embedOpen.get(ctx.sourcePath);
     if (!opened) this.embedOpen.set(ctx.sourcePath, opened = /* @__PURE__ */ new Set());
-    const card = this.buildCard(el, file, owner, opened);
+    const card = this.buildCard(el, file, owner, opened, void 0, true);
     owner.registerEvent(
       this.app.vault.on("modify", (f) => {
         if (f.path === file.path) card.invalidate();

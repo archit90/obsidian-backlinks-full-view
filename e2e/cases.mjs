@@ -1441,7 +1441,11 @@ export function register(test, T) {
         const s = await embState();
         eq("one card for ![[Target]]", s.cards, 1);
         eq("the heading embed stays Obsidian's", s.native, ["_bfv/emb/Target#Sec"]);
-        eq("collapsed at first, title, folder", [s.collapsed, s.title, s.folder], [true, "Target", "_bfv/emb/"]);
+        eq(
+          "collapsed at first, full path as title, no folder label",
+          [s.collapsed, s.title, s.folder],
+          [true, "_bfv/emb/Target", null],
+        );
         eq("card border", s.border, "solid");
         check("nothing rendered while collapsed", !s.body && s.props === null, s);
         await click(embHeader);
