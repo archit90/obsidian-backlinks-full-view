@@ -1,6 +1,6 @@
 {
   "name": "obsidian-backlinks-full-view",
-  "version": "0.1.1",
+  "version": "0.1.0",
   "description": "Shows backlinked notes in full, in collapsible sections below the current note.",
   "license": "MIT",
   "author": "Archit Gupta",

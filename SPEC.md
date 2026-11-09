@@ -237,7 +237,7 @@ type `editor-lanes` and its `.lanes-view` element.
   lost and the debouncer never runs again. Seen 2026-11-08: Backlinks Full View built no panes until a restart.
 - **Internals:** every Obsidian internal used was checked against Obsidian 1.15.0's `app.js` and `app.css`.
   `minAppVersion` is 1.15.0. A new Obsidian version means re-checking them.
-- **Versions and releases:** the version is 0.1.1, and releases bump the patch version only (0.1.1 → 0.1.2 …);
+- **Versions and releases:** the version is 0.1.0, and releases bump the patch version only (0.1.0 → 0.1.1 …);
   the minor and major stay. `npm run release` (= `npm version patch`) bumps `package.json`, then
   `scripts/version-bump.mjs` copies the version into `manifest.json` and `versions.json`; npm commits and tags it
   (tag = the version, no `v`, `.npmrc`). `scripts/version-bump.mjs` refuses a new minor or major version (and puts

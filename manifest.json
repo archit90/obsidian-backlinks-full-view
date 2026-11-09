@@ -1,7 +1,7 @@
 {
   "id": "backlinks-full-view",
   "name": "Backlinks Full View",
-  "version": "0.1.1",
+  "version": "0.1.0",
   "minAppVersion": "1.15.0",
   "description": "Shows backlinked notes in full, in collapsible sections below the current note.",
   "author": "Archit",
